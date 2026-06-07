@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://neomarket:neomarket_pass@db:5432/neomarket_b2c"
     
     # B2B API
-    B2B_API_URL: str = "http://localhost:8001/api/v1"
+    B2B_API_URL: str = "http://host.docker.internal:8001/api/v1"
     
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:8080"]

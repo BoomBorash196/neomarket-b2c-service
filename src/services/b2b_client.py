@@ -66,6 +66,8 @@ class B2BClient:
         """Get products filtered by category and optional filters."""
         async with httpx.AsyncClient() as client:
             params = {"page": page, "page_size": page_size}
+            if category_id:
+                params["category_id"] = category_id
             if filters:
                 params.update(filters)
             
@@ -75,8 +77,34 @@ class B2BClient:
                 timeout=10.0
             )
             if response.status_code == 200:
-                return response.json()
+                products = response.json()
+                # Convert to expected format
+                return {
+                    "products": [
+                        {
+                            "product_id": p.id,
+                            "title": p.title,
+                            "main_image_url": p.images[0].url if p.images else "",
+                            "min_price": min([s.price for s in p.skus], default=0),
+                            "is_available": p.status == "MODERATED" and not p.deleted,
+                        }
+                        for p in products
+                    ],
+                    "total": len(products)
+                }
             return {"products": [], "total": 0}
+
+    async def get_products_batch(self, product_ids: list[int]) -> dict[str, dict]:
+        """Get multiple products by IDs (batch request)."""
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/products/batch",
+                json={"product_ids": product_ids},
+                timeout=10.0
+            )
+            if response.status_code == 200:
+                return response.json()
+            return {}
 
     async def reserve_stock(self, reservations: list[dict]) -> dict:
         """Reserve stock in B2B for order creation."""
