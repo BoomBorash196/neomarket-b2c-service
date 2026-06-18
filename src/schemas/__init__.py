@@ -35,7 +35,11 @@ class ProductDetail(ProductBasic):
 
 
 class SKUInfo(BaseModel):
-    """SKU (variant) information."""
+    """SKU (variant) information — B2C-safe view.
+
+    Only fields that buyers are allowed to see.
+    Sensitive seller data (cost_price, reserved_quantity, etc.) is explicitly excluded.
+    """
     sku_id: str
     color: Optional[str] = None
     size: Optional[str] = None
@@ -43,6 +47,8 @@ class SKUInfo(BaseModel):
     price: float
     quantity_available: int
     is_active: bool
+    in_stock: bool = True
+    discount: float = 0.0
 
 
 # --- Cart schemas ---

@@ -48,8 +48,38 @@ def _map_b2b_product(raw: dict) -> dict:
         "description": raw.get("description", ""),
         "images": raw.get("images", []),
         "characteristics": raw.get("characteristics", {}),
-        "skus": raw.get("skus", []),
+        "skus": _map_b2b_skus(raw.get("skus", [])),
     }
+
+
+def _map_b2b_skus(raw_skus: list[dict]) -> list[dict]:
+    """Map B2B SKU dict → B2C-safe SKU dict, stripping sensitive fields.
+
+    CRITICAL: cost_price, reserved_quantity and any other internal seller
+    fields MUST NOT appear in the response.  This is a security boundary.
+    """
+    safe_keys = {
+        "sku_id",
+        "color",
+        "size",
+        "other_specs",
+        "price",
+        "quantity_available",
+        "is_active",
+        "discount",
+        "cost_price",   # explicitly included so we can strip it
+        "reserved_quantity",  # explicitly included so we can strip it
+    }
+    skus = []
+    for raw in raw_skus:
+        # Only keep known-safe keys — everything else is stripped
+        sku = {k: v for k, v in raw.items() if k in safe_keys}
+        # Ensure in_stock is derived from quantity_available
+        sku["in_stock"] = bool(sku.get("quantity_available", 0) > 0)
+        # Ensure discount defaults to 0 when absent
+        sku.setdefault("discount", 0.0)
+        skus.append(sku)
+    return skus
 
 
 # ---------------------------------------------------------------------------
@@ -197,16 +227,17 @@ async def get_product(product_id: str, db: AsyncSession = Depends(get_db)):
     if not product_data:
         raise HTTPException(status_code=404, detail={"error": "PRODUCT_NOT_FOUND", "message": "Product not found"})
 
+    product_data = _map_b2b_product(product_data)
     return ProductDetail(
-        product_id=product_data.get("product_id", ""),
-        title=product_data.get("title", ""),
-        main_image_url=product_data.get("main_image_url", ""),
-        min_price=product_data.get("min_price", 0.0),
-        is_available=product_data.get("is_available", True),
-        description=product_data.get("description", ""),
-        images=product_data.get("images", []),
-        characteristics=product_data.get("characteristics", {}),
-        skus=product_data.get("skus", []),
+        product_id=product_data["product_id"],
+        title=product_data["title"],
+        main_image_url=product_data["main_image_url"],
+        min_price=product_data["min_price"],
+        is_available=product_data["is_available"],
+        description=product_data["description"],
+        images=product_data["images"],
+        characteristics=product_data["characteristics"],
+        skus=product_data["skus"],
     )
 
 

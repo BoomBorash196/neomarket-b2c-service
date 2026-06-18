@@ -473,8 +473,12 @@ def test_b2b_unavailable_returns_502_categories(client: TestClient):
 # TEST 5 — product not found (404)
 # ======================================================================
 
+# ======================================================================
+# TEST 5 — product not found (blocked/deleted) returns 404
+# ======================================================================
+
 def test_product_not_found_returns_404(client: TestClient):
-    """Non-existent product returns 404."""
+    """Non-existent or blocked product returns 404."""
 
     with patch(CATALOG_MODULE) as mock_b2b:
         mock_b2b.get_product_by_id = AsyncMock(return_value=None)
@@ -487,30 +491,40 @@ def test_product_not_found_returns_404(client: TestClient):
 
 
 # ======================================================================
-# TEST 6 — product detail returns full data
+# TEST 6 — product card happy path
 # ======================================================================
 
-def test_get_product_detail_returns_full_data(client: TestClient):
-    """GET /products/{id} returns full product detail with images and characteristics."""
+def test_product_card_returns_full_data_with_skus(client: TestClient):
+    """Happy path: product card returns full data with SKUs (photos, description, prices)."""
 
     product = {
         "product_id": "p1",
-        "title": "Full Product",
+        "title": "Wireless Headphones",
         "main_image_url": "http://main.jpg",
-        "min_price": 999.99,
+        "min_price": 4999.0,
         "is_available": True,
-        "description": "Full description",
-        "images": ["http://img1.jpg", "http://img2.jpg"],
-        "characteristics": {"color": "red", "size": "L"},
+        "description": "High-quality wireless headphones with ANC.",
+        "images": ["http://img1.jpg", "http://img2.jpg", "http://img3.jpg"],
+        "characteristics": {"color": "black", "bluetooth": "5.0"},
         "skus": [
             {
-                "sku_id": "s1",
-                "color": "red",
-                "size": "L",
-                "price": 999.99,
-                "quantity_available": 5,
+                "sku_id": "s1-black",
+                "color": "black",
+                "size": None,
+                "price": 4999.0,
+                "quantity_available": 10,
                 "is_active": True,
-            }
+                "discount": 500.0,
+            },
+            {
+                "sku_id": "s2-white",
+                "color": "white",
+                "size": None,
+                "price": 5299.0,
+                "quantity_available": 3,
+                "is_active": True,
+                "discount": 0.0,
+            },
         ],
     }
 
@@ -521,13 +535,142 @@ def test_get_product_detail_returns_full_data(client: TestClient):
 
     assert resp.status_code == 200
     data = resp.json()
+
+    # Product-level fields
     assert data["product_id"] == "p1"
-    assert data["title"] == "Full Product"
-    assert data["min_price"] == 999.99
-    assert len(data["images"]) == 2
-    assert data["characteristics"]["color"] == "red"
-    assert len(data["skus"]) == 1
-    assert data["skus"][0]["sku_id"] == "s1"
+    assert data["title"] == "Wireless Headphones"
+    assert data["min_price"] == 4999.0
+    assert len(data["images"]) == 3
+    assert data["characteristics"]["color"] == "black"
+    assert data["description"] == "High-quality wireless headphones with ANC."
+
+    # SKUs
+    assert len(data["skus"]) == 2
+
+    sku1 = next(s for s in data["skus"] if s["sku_id"] == "s1-black")
+    assert sku1["color"] == "black"
+    assert sku1["price"] == 4999.0
+    assert sku1["quantity_available"] == 10
+    assert sku1["is_active"] is True
+    assert sku1["in_stock"] is True
+    assert sku1["discount"] == 500.0
+
+    sku2 = next(s for s in data["skus"] if s["sku_id"] == "s2-white")
+    assert sku2["price"] == 5299.0
+    assert sku2["discount"] == 0.0
+
+
+# ======================================================================
+# TEST 7 — cost_price MUST NOT appear in response
+# ======================================================================
+
+def test_cost_price_absent_in_response(client: TestClient):
+    """CRITICAL: cost_price must never appear in B2C SKU response.
+
+    This is a security boundary — cost_price is internal seller data.
+    Even if B2B returns it, it must be stripped from the B2C response.
+    """
+
+    product = {
+        "product_id": "p1",
+        "title": "Test Product",
+        "main_image_url": "http://img.jpg",
+        "min_price": 1000.0,
+        "is_available": True,
+        "description": "Test",
+        "images": [],
+        "characteristics": {},
+        "skus": [
+            {
+                "sku_id": "s1",
+                "color": "red",
+                "price": 1000.0,
+                "quantity_available": 5,
+                "is_active": True,
+                # B2B may return internal fields — they MUST be stripped
+                "cost_price": 250.0,
+                "reserved_quantity": 2,
+                "internal_note": "secret",
+                "margin": 3.0,
+            },
+        ],
+    }
+
+    with patch(CATALOG_MODULE) as mock_b2b:
+        mock_b2b.get_product_by_id = AsyncMock(return_value=product)
+
+        resp = client.get("/api/v1/catalog/products/p1")
+
+    assert resp.status_code == 200
+    data = resp.json()
+
+    sku = data["skus"][0]
+
+    # Explicit security assertions — these fields MUST be absent
+    assert "cost_price" not in sku, "cost_price LEAKED — security violation!"
+    assert "reserved_quantity" not in sku, "reserved_quantity LEAKED — security violation!"
+    assert "internal_note" not in sku, "internal_note LEAKED — security violation!"
+    assert "margin" not in sku, "margin LEAKED — security violation!"
+
+    # Safe fields still present
+    assert sku["sku_id"] == "s1"
+    assert sku["price"] == 1000.0
+    assert sku["quantity_available"] == 5
+    assert sku["is_active"] is True
+
+
+# ======================================================================
+# TEST 8 — SKU without stock is shown as unavailable (not hidden)
+# ======================================================================
+
+def test_sku_without_stock_is_shown_as_unavailable(client: TestClient):
+    """SKU with quantity_available = 0 is returned but with in_stock = false."""
+
+    product = {
+        "product_id": "p1",
+        "title": "Limited Product",
+        "main_image_url": "http://img.jpg",
+        "min_price": 2000.0,
+        "is_available": True,
+        "description": "Only some SKUs in stock",
+        "images": [],
+        "characteristics": {},
+        "skus": [
+            {
+                "sku_id": "s1-in-stock",
+                "color": "red",
+                "price": 2000.0,
+                "quantity_available": 5,
+                "is_active": True,
+            },
+            {
+                "sku_id": "s2-out-of-stock",
+                "color": "blue",
+                "price": 2200.0,
+                "quantity_available": 0,
+                "is_active": True,
+            },
+        ],
+    }
+
+    with patch(CATALOG_MODULE) as mock_b2b:
+        mock_b2b.get_product_by_id = AsyncMock(return_value=product)
+
+        resp = client.get("/api/v1/catalog/products/p1")
+
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # Both SKUs are in the list (not hidden)
+    assert len(data["skus"]) == 2
+
+    sku_in = next(s for s in data["skus"] if s["sku_id"] == "s1-in-stock")
+    assert sku_in["quantity_available"] == 5
+    assert sku_in["in_stock"] is True
+
+    sku_out = next(s for s in data["skus"] if s["sku_id"] == "s2-out-of-stock")
+    assert sku_out["quantity_available"] == 0
+    assert sku_out["in_stock"] is False
 
 
 # ======================================================================
