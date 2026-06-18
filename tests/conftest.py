@@ -9,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 from src.main import app
 from src.database import Base, get_db
 from src.config import settings
+from src.services.b2b_client import b2b_client
 
 # Test database URL (in-memory SQLite for speed)
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
@@ -48,3 +49,12 @@ def client(db_session: AsyncSession) -> Generator[TestClient, None, None]:
         yield client
     
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def reset_b2b_client():
+    """Reset b2b_client singleton mocks between tests to prevent cross-test pollution."""
+    import importlib
+    import src.services.b2b_client
+    importlib.reload(src.services.b2b_client)
+    yield

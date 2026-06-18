@@ -14,6 +14,7 @@ class OrderStatus(str, Enum):
     DELIVERING = "DELIVERING"
     DELIVERED = "DELIVERED"
     CANCELLED = "CANCELLED"
+    CANCEL_PENDING = "CANCEL_PENDING"  # unreserve failed, retry scheduled
 
 
 # --- Product schemas (from B2B) ---

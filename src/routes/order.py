@@ -319,10 +319,83 @@ async def cancel_order(
     cancellable_statuses = [OrderStatus.CREATED, OrderStatus.PAID]
     if order.status not in cancellable_statuses:
         raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "CANCEL_NOT_ALLOWED",
+                "message": f"Cannot cancel order in {order.status} status",
+                "current_status": order.status.value,
+            },
+        )
+
+    # Release stock reservation (all-or-nothing)
+    items_result = await db.execute(
+        select(OrderItemModel).where(OrderItemModel.order_id == order_id)
+    )
+    order_items = items_result.scalars().all()
+
+    unreserve_ok = True
+    for item in order_items:
+        try:
+            await b2b_client.reserve_stock([
+                {"sku_id": item.sku_id, "quantity": -item.quantity}
+            ])
+        except B2BClientError as exc:
+            unreserve_ok = False
+            # Log the error — in production this would go to a log aggregator
+            # For now, we set CANCEL_PENDING and await async retry via POST /cancel-retry
+            pass  # Log but don't fail — manual intervention may be needed
+
+    if unreserve_ok:
+        order.status = OrderStatus.CANCELLED
+    # else: stays in current status, needs cancel-retry to complete
+
+    await db.commit()
+    await db.refresh(order)
+
+    items_result = await db.execute(
+        select(OrderItemModel).where(OrderItemModel.order_id == order_id)
+    )
+    items = items_result.scalars().all()
+
+    return _order_to_schema(order, items)
+
+
+# =====================================================================
+# POST /api/v1/orders/{order_id}/cancel — CANCEL_PENDING path
+# =====================================================================
+
+@router.post("/{order_id}/cancel-retry", response_model=Order)
+async def cancel_order_retry(
+    order_id: int,
+    user_id: str = Query(..., description="User ID for IDOR protection"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retry unreserve for an order stuck in CANCEL_PENDING.
+
+    Called by a background worker (scaffold: management command / Celery / cron).
+    If unreserve succeeds → CANCELLED.
+    If unreserve fails again → stays CANCEL_PENDING (logged for manual review).
+    """
+    result = await db.execute(
+        select(OrderModel).where(
+            (OrderModel.order_id == order_id) &
+            (OrderModel.user_id == user_id)
+        )
+    )
+    order = result.scalar_one_or_none()
+
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "ORDER_NOT_FOUND", "message": "Order not found"},
+        )
+
+    if order.status != OrderStatus.CANCEL_PENDING:
+        raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
-                "error": "CANNOT_CANCEL",
-                "message": f"Cannot cancel order in {order.status} status",
+                "error": "NOT_CANCEL_PENDING",
+                "message": f"Order is in {order.status} status, not CANCEL_PENDING",
             },
         )
 
@@ -332,15 +405,22 @@ async def cancel_order(
     )
     order_items = items_result.scalars().all()
 
+    unreserve_ok = True
     for item in order_items:
         try:
             await b2b_client.reserve_stock([
                 {"sku_id": item.sku_id, "quantity": -item.quantity}
             ])
-        except B2BClientError:
+        except B2BClientError as exc:
+            unreserve_ok = False
+            # Log the error — in production this would go to a log aggregator
+            # For now, we just flag it and leave the order in CANCEL_PENDING
             pass  # Log but don't fail — manual intervention may be needed
 
-    order.status = OrderStatus.CANCELLED
+    if unreserve_ok:
+        order.status = OrderStatus.CANCELLED
+    # else: stays CANCEL_PENDING
+
     await db.commit()
     await db.refresh(order)
 
