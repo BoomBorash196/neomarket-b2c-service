@@ -77,6 +77,31 @@ class Cart(BaseModel):
     total_amount: float
 
 
+class UnavailableCartItem(BaseModel):
+    """Cart item that is unavailable (out of stock or inactive).
+
+    Shown in the response so the buyer sees what they added,
+    but excluded from total_amount.  unavailable_reason is computed
+    live from B2B — never stored in DB.
+    """
+    cart_item_id: int
+    sku_id: str
+    quantity: int
+    product_id: str
+    product_title: str
+    price: float
+    unavailable_reason: str  # "out_of_stock" | "not_active" | "sku_not_found"
+
+
+class CartWithUnavailable(BaseModel):
+    """Cart response with both available and unavailable items."""
+    user_id: str
+    items: List[CartItem]
+    total_items: int
+    total_amount: float
+    unavailable: List[UnavailableCartItem] = []
+
+
 # --- Order schemas ---
 class OrderItemCreate(BaseModel):
     """Order item from cart."""
