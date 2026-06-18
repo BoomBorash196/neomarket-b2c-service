@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     
     # B2B API
     B2B_API_URL: str = "http://host.docker.internal:8001/api/v1"
-    
+    B2B_SERVICE_KEY: str = "neomarket-b2c-secret-key"
+
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:8080"]
 

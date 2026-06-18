@@ -175,18 +175,48 @@ class Collection(BaseModel):
     max_display: int = 8
 
 
-# --- Filter schemas ---
+# --- Filter / Facet schemas ---
+class FilterValue(BaseModel):
+    """A single filter value with count."""
+    value: str
+    label: str
+    count: int
+
+
 class FilterOption(BaseModel):
     """Available filter option."""
     name: str
     label: str
-    values: List[dict[str, str]]
+    values: List[FilterValue]
 
 
 class ProductFilters(BaseModel):
     """Available filters for a category."""
     category_id: str
     filters: List[FilterOption]
+
+
+class FacetBucket(BaseModel):
+    """A single facet field with its value buckets."""
+    name: str
+    label: str
+    values: List[FilterValue]
+
+
+class FacetsResponse(BaseModel):
+    """Response with facet counts for the current filter context."""
+    category_id: str
+    facets: List[FacetBucket]
+
+
+# --- Catalog list / pagination schemas ---
+class ProductListResponse(BaseModel):
+    """Paginated product list with optional applied filters."""
+    products: List[ProductDetail]
+    total: int
+    page: int
+    page_size: int
+    filters_applied: Optional[dict] = None
 
 
 # --- Recommendation schemas ---
