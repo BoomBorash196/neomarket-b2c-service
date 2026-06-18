@@ -113,18 +113,21 @@ class OrderItemCreate(BaseModel):
 class OrderCreate(BaseModel):
     """Create order from cart."""
     user_id: str
+    idempotency_key: str
     items: List[OrderItemCreate]
     total_amount: float
 
 
 class OrderItem(BaseModel):
-    """Order item details."""
+    """Order item details — historical snapshot at purchase time."""
     order_item_id: int
     order_id: int
     sku_id: str
+    sku_name: str
+    product_id: str
     product_title: str
     quantity: int
-    price: float
+    unit_price: float
 
 
 class Order(BaseModel):

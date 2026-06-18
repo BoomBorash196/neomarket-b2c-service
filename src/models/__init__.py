@@ -41,6 +41,7 @@ class OrderModel(Base):
 
     order_id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String(64), nullable=False, index=True)
+    idempotency_key = Column(String(128), unique=True, nullable=True, index=True)
     status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.CREATED)
     total_amount = Column(Float, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -50,16 +51,17 @@ class OrderModel(Base):
 
 
 class OrderItemModel(Base):
-    """Order items."""
+    """Order items — historical snapshot at purchase time."""
     __tablename__ = "order_items"
 
     order_item_id = Column(Integer, primary_key=True, autoincrement=True)
     order_id = Column(Integer, ForeignKey("orders.order_id", ondelete="CASCADE"), nullable=False)
     sku_id = Column(String(64), nullable=False)
+    sku_name = Column(String(255), nullable=False, default="")
     product_id = Column(String(64), nullable=False)
     product_title = Column(String(255), nullable=False)
     quantity = Column(Integer, nullable=False)
-    price = Column(Float, nullable=False)
+    unit_price = Column(Float, nullable=False)
 
     order = relationship("OrderModel", back_populates="items")
 
