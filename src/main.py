@@ -8,7 +8,7 @@ from starlette.status import HTTP_409_CONFLICT, HTTP_500_INTERNAL_SERVER_ERROR
 
 from src.config import settings
 from src.database import engine, Base
-from src.routes import cart, order, wishlist, catalog, home, recommendations
+from src.routes import cart, order, wishlist, catalog, home, recommendations, subscriptions
 
 
 def create_app() -> FastAPI:
@@ -68,6 +68,7 @@ def create_app() -> FastAPI:
     app.include_router(cart.router, prefix="/api/v1/cart", tags=["Cart"])
     app.include_router(order.router, prefix="/api/v1/orders", tags=["Orders"])
     app.include_router(wishlist.router, prefix="/api/v1/wishlist", tags=["Wishlist"])
+    app.include_router(subscriptions.router, prefix="/api/v1/cart", tags=["Cart"])
     app.include_router(catalog.router, prefix="/api/v1/catalog", tags=["Catalog"])
     app.include_router(home.router, prefix="/api/v1/home", tags=["Home"])
     app.include_router(recommendations.router, prefix="/api/v1/recommendations", tags=["Recommendations"])

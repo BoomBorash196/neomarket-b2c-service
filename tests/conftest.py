@@ -38,8 +38,16 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
 
 @pytest.fixture(scope="function")
 def client(db_session: AsyncSession) -> Generator[TestClient, None, None]:
-    """Create a test client with a mock database."""
+    """Create a test client with a mock database.
+
+    override_get_db is an async generator that yields the SAME db_session
+    for every HTTP request. FastAPI calls get_db() and does `async for
+    value in get_db()`. Each call creates a new generator, but all
+    generators yield the identical session object, so commits from one
+    request are visible to the next.
+    """
     async def override_get_db():
+        await db_session.rollback()  # reset session state between requests
         yield db_session
 
     app.dependency_overrides[get_db] = override_get_db

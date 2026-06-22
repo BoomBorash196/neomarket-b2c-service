@@ -90,3 +90,22 @@ class BannerModel(Base):
     priority = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class SubscriptionModel(Base):
+    """Product availability change subscriptions.
+
+    One row per (user_id, sku_id). notify_on records the event type
+    that triggered the subscription (MVP: only "in_stock").
+    """
+    __tablename__ = "subscriptions"
+
+    subscription_id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(64), nullable=False, index=True)
+    sku_id = Column(String(64), nullable=False)
+    notify_on = Column(String(32), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint('user_id', 'sku_id', name='uq_sub_user_sku'),
+    )

@@ -17,6 +17,11 @@ from src.schemas import (
     FacetsResponse,
     ProductDetailSchema,
     PaginatedCatalogProducts,
+    RecommendationList,
+    ProductBasic,
+    CategoryDetail,
+    BreadcrumbItem,
+    BreadcrumbsResponse,
 )
 from src.services.b2b_client import b2b_client, B2BClientError
 
@@ -349,6 +354,353 @@ async def get_facets(
         category_id=category_id or "",
         facets=facets,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/catalog/products/{product_id}/similar
+# ---------------------------------------------------------------------------
+SIMILAR_LIMIT: int = 8
+
+
+@router.get("/products/{product_id}/similar", response_model=RecommendationList)
+async def get_similar_products(
+    product_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get similar products from the same category, excluding the current product.
+
+    Algorithm (canon-flow):
+      1. Fetch current product to get its category_id and parent_category_id.
+      2. Query B2B for similar products in the same category (up to 8).
+      3. If fewer than 8, fill from parent category.
+      4. Always exclude the current product from results.
+      5. If category has no products → return 200 with empty list.
+      6. If product not found → return 404.
+    """
+    # Step 1: get current product to know its category
+    try:
+        current_product = await b2b_client.get_product_by_id(product_id)
+    except B2BClientError as exc:
+        raise _b2b_error(502, exc.message)
+
+    if current_product is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "PRODUCT_NOT_FOUND", "message": "Product not found"},
+        )
+
+    category_id: str = current_product.get("category_id", "")
+    parent_category_id: Optional[str] = current_product.get("parent_category_id")
+
+    # Step 2: get similar from same category
+    similar_ids: set = set()
+    recommendations: List[ProductBasic] = []
+    from_same_category: bool = False
+
+    if category_id:
+        try:
+            similar_result = await b2b_client.get_similar_products(
+                product_id=product_id,
+                category_id=category_id,
+                limit=SIMILAR_LIMIT,
+            )
+        except B2BClientError as exc:
+            raise _b2b_error(502, exc.message)
+
+        for raw in similar_result.get("products", []):
+            pid = raw.get("product_id", "")
+            if pid and pid != product_id and pid not in similar_ids:
+                similar_ids.add(pid)
+                recommendations.append(
+                    ProductBasic(
+                        id=pid,
+                        name=raw.get("title", ""),
+                        main_image_url=raw.get("main_image_url", ""),
+                        min_price=float(raw.get("min_price", 0.0)),
+                        has_stock=bool(raw.get("is_available", True)),
+                    )
+                )
+                if len(recommendations) >= SIMILAR_LIMIT:
+                    break
+
+        from_same_category = len(recommendations) > 0
+
+    # Step 3: fallback to parent category if not enough
+    filled_from_parent = False
+    if len(recommendations) < SIMILAR_LIMIT and parent_category_id:
+        try:
+            more_result = await b2b_client.get_similar_products(
+                product_id=product_id,
+                category_id=parent_category_id,
+                limit=(SIMILAR_LIMIT - len(recommendations)) * 2,
+            )
+        except B2BClientError as exc:
+            # Non-fatal — log and continue with what we have
+            pass
+        else:
+            for raw in more_result.get("products", []):
+                pid = raw.get("product_id", "")
+                if pid and pid != product_id and pid not in similar_ids:
+                    similar_ids.add(pid)
+                    recommendations.append(
+                        ProductBasic(
+                            id=pid,
+                            name=raw.get("title", ""),
+                            main_image_url=raw.get("main_image_url", ""),
+                            min_price=float(raw.get("min_price", 0.0)),
+                            has_stock=bool(raw.get("is_available", True)),
+                        )
+                    )
+                    if len(recommendations) >= SIMILAR_LIMIT:
+                        break
+            filled_from_parent = len(more_result.get("products", [])) > 0
+
+    # Determine reason
+    if not recommendations:
+        reason = "no_similar_products"
+    elif filled_from_parent:
+        reason = "parent_category"
+    elif from_same_category:
+        reason = "same_category"
+    else:
+        reason = "no_similar_products"
+
+    return RecommendationList(
+        current_product_id=product_id,
+        recommendations=recommendations,
+        reason=reason,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers for category navigation
+# ---------------------------------------------------------------------------
+
+def _build_category_tree(flat_categories: List[dict]) -> List[CategoryNode]:
+    """Build a nested tree from a flat list of category dicts.
+
+    Each dict must have at least `category_id`, `name`, and optionally `parent_id`.
+    """
+    by_id: dict[str, CategoryNode] = {}
+    roots: List[CategoryNode] = []
+
+    for c in flat_categories:
+        cid = str(c.get("category_id", ""))
+        if not cid:
+            continue
+        by_id[cid] = CategoryNode(
+            category_id=cid,
+            name=str(c.get("name", "")),
+            parent_id=c.get("parent_id"),
+        )
+
+    for cid, node in by_id.items():
+        if node.parent_id and node.parent_id in by_id:
+            by_id[node.parent_id].children.append(node)
+        else:
+            roots.append(node)
+
+    return roots
+
+
+def _find_category(
+    category_id: str,
+    tree: List[CategoryNode],
+) -> Optional[CategoryNode]:
+    """Find a category node by ID in a nested tree."""
+    for node in tree:
+        if node.category_id == category_id:
+            return node
+        found = _find_category(category_id, node.children)
+        if found:
+            return found
+    return None
+
+
+def _build_breadcrumbs(
+    category_id: str,
+    flat_categories: List[dict],
+) -> List[BreadcrumbItem]:
+    """Build breadcrumbs from root to target category.
+
+    Raises ValueError on orphan node (parent_id points to non-existent category).
+    """
+    by_id: dict[str, dict] = {}
+    for c in flat_categories:
+        cid = str(c.get("category_id", ""))
+        if cid:
+            by_id[cid] = c
+
+    if category_id not in by_id:
+        raise ValueError(f"Category {category_id} not found")
+
+    path: List[dict] = []
+    current_id: Optional[str] = category_id
+    visited: set = set()
+
+    while current_id:
+        if current_id in visited:
+            # Cycle detected — treat as orphan
+            raise ValueError(f"Cycle detected in category hierarchy at {current_id}")
+        visited.add(current_id)
+
+        if current_id not in by_id:
+            raise ValueError(f"Orphan node: {current_id} has no definition in category list")
+
+        entry = by_id[current_id]
+        path.append(entry)
+        current_id = entry.get("parent_id")
+
+    # Reverse so root → leaf
+    path.reverse()
+    return [
+        BreadcrumbItem(
+            category_id=str(p.get("category_id", "")),
+            name=str(p.get("name", "")),
+            parent_id=p.get("parent_id"),
+        )
+        for p in path
+    ]
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/catalog/categories/tree
+# ---------------------------------------------------------------------------
+
+@router.get("/categories/tree", response_model=list[dict])
+async def get_category_tree():
+    """Get the full category tree as a nested structure."""
+    try:
+        flat = await b2b_client.get_categories()
+    except B2BClientError as exc:
+        raise _b2b_error(502, exc.message)
+
+    tree = _build_category_tree(flat)
+
+    # Convert to dict for JSON response (Pydantic handles serialization)
+    def _node_to_dict(node: CategoryNode) -> dict:
+        return {
+            "category_id": node.category_id,
+            "name": node.name,
+            "parent_id": node.parent_id,
+            "children": [_node_to_dict(c) for c in node.children],
+        }
+
+    return [_node_to_dict(n) for n in tree]
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/catalog/categories/{category_id}
+# ---------------------------------------------------------------------------
+
+@router.get("/categories/{category_id}", response_model=CategoryDetail)
+async def get_category_detail(category_id: str):
+    """Get details for a single category."""
+    try:
+        flat = await b2b_client.get_categories()
+    except B2BClientError as exc:
+        raise _b2b_error(502, exc.message)
+
+    node = _find_category(category_id, _build_category_tree(flat))
+    if node is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "CATEGORY_NOT_FOUND", "message": f"Category {category_id} not found"},
+        )
+
+    return CategoryDetail(
+        category_id=node.category_id,
+        name=node.name,
+        parent_id=node.parent_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/catalog/breadcrumbs
+# ---------------------------------------------------------------------------
+
+@router.get("/breadcrumbs", response_model=BreadcrumbsResponse)
+async def get_breadcrumbs(
+    category_id: Optional[str] = Query(None, description="Category ID for breadcrumbs"),
+    product_id: Optional[str] = Query(None, description="Product ID — breadcrumbs built from its category"),
+):
+    """Build breadcrumbs path from root to the target category.
+
+    Accepts exactly one of: category_id or product_id.
+    Both provided → 400. Neither provided → 400.
+    Orphan / broken hierarchy → 422.
+    Unknown category → 404.
+    """
+    if category_id and product_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "AMBIGUOUS_PARAMS",
+                "message": "Provide exactly one of: category_id or product_id",
+            },
+        )
+
+    if not category_id and not product_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "MISSING_PARAMS",
+                "message": "Provide either category_id or product_id",
+            },
+        )
+
+    target_category_id: Optional[str] = category_id
+
+    # If only product_id given, resolve its category
+    if product_id and not category_id:
+        try:
+            product = await b2b_client.get_product_by_id(product_id)
+        except B2BClientError as exc:
+            raise _b2b_error(502, exc.message)
+
+        if product is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "PRODUCT_NOT_FOUND", "message": "Product not found"},
+            )
+
+        target_category_id = product.get("category_id")
+        if not target_category_id:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "CATEGORY_MISSING",
+                    "message": "Product has no category_id",
+                },
+            )
+
+    if not target_category_id:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "NO_TARGET", "message": "No category resolved"},
+        )
+
+    try:
+        flat = await b2b_client.get_categories()
+    except B2BClientError as exc:
+        raise _b2b_error(502, exc.message)
+
+    try:
+        breadcrumbs = _build_breadcrumbs(target_category_id, flat)
+    except ValueError as exc:
+        msg = str(exc)
+        if "Orphan" in msg or "Cycle" in msg:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "ORPHAN_NODE", "message": msg},
+            )
+        # "not found"
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "CATEGORY_NOT_FOUND", "message": msg},
+        )
+
+    return BreadcrumbsResponse(items=breadcrumbs)
 
 
 # ---------------------------------------------------------------------------

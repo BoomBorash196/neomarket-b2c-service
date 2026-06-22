@@ -163,6 +163,28 @@ class Wishlist(BaseModel):
     items: List[WishlistItem]
 
 
+# --- Subscription schemas ---
+class NotifyOn(str, Enum):
+    """Types of product events to subscribe to."""
+    IN_STOCK = "in_stock"  # product is back in stock
+    LOW_STOCK = "low_stock"  # product stock is running low
+
+
+class SubscriptionCreate(BaseModel):
+    """Create a product availability subscription."""
+    sku_id: str
+    notify_on: NotifyOn
+
+
+class Subscription(BaseModel):
+    """Subscription response."""
+    subscription_id: int
+    user_id: str
+    sku_id: str
+    notify_on: str
+    created_at: datetime
+
+
 # --- Category schemas ---
 class CategoryNode(BaseModel):
     """Category tree node."""
@@ -170,6 +192,25 @@ class CategoryNode(BaseModel):
     name: str
     parent_id: Optional[str] = None
     children: List["CategoryNode"] = []
+
+
+class CategoryDetail(BaseModel):
+    """Detailed info about a single category."""
+    category_id: str
+    name: str
+    parent_id: Optional[str] = None
+
+
+class BreadcrumbItem(BaseModel):
+    """A single item in the breadcrumbs chain."""
+    category_id: str
+    name: str
+    parent_id: Optional[str] = None
+
+
+class BreadcrumbsResponse(BaseModel):
+    """Breadcrumbs path from root to target category."""
+    items: List[BreadcrumbItem]
 
 
 # --- Collection/Banner schemas ---

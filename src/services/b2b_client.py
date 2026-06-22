@@ -176,6 +176,26 @@ class B2BClient:
         except B2BClientError:
             return {"products": [], "total": 0}
 
+    async def get_similar_products(
+        self,
+        product_id: str,
+        category_id: str,
+        limit: int = 8,
+    ) -> dict:
+        """Get similar products from B2B (proxy to B2B algorithm).
+
+        Returns products from the same category, excluding the current product.
+        """
+        params: dict = {
+            "product_id": product_id,
+            "category_id": category_id,
+            "limit": limit,
+        }
+        try:
+            return await self._request("GET", "/catalog/similar", params=params)
+        except B2BClientError as exc:
+            raise exc
+
     async def reserve_stock(self, reservations: list[dict]) -> dict:
         """Reserve stock in B2B for order creation.
 
