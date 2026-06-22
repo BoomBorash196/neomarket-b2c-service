@@ -222,6 +222,14 @@ class Banner(BaseModel):
     link_url: str
     priority: int
     is_active: bool
+    starts_at: Optional[datetime] = None
+    ends_at: Optional[datetime] = None
+
+
+class BannerClickCreate(BaseModel):
+    """Record a banner click for CTR analytics."""
+    banner_id: int
+    user_id: Optional[str] = None
 
 
 class CollectionProduct(BaseModel):
@@ -239,6 +247,7 @@ class Collection(BaseModel):
     description: Optional[str] = None
     products: List[CollectionProduct]
     max_display: int = 8
+    unavailable_ids: List[str] = []  # product_ids unavailable in B2B
 
 
 # --- Filter / Facet schemas ---

@@ -163,6 +163,23 @@ class B2BClient:
         except B2BClientError:
             return {}
 
+    async def get_products_by_ids(self, product_ids: list[str]) -> dict[str, dict]:
+        """Get multiple products by string IDs (batch request).
+
+        Returns a dict mapping product_id -> product_data.
+        Returns empty dict on failure.
+        """
+        if not product_ids:
+            return {}
+        try:
+            resp = await self._request(
+                "POST", "/public/products/batch",
+                json_body={"product_ids": product_ids},
+            )
+            return resp if isinstance(resp, dict) else {}
+        except B2BClientError:
+            return {}
+
     async def get_products_by_category(
         self,
         category_id: str,
