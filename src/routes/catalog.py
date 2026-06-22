@@ -1,5 +1,6 @@
 """Catalog routes — product listing with filters, sorting, facets, and pagination."""
 
+import re
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +21,38 @@ from src.schemas import (
 from src.services.b2b_client import b2b_client, B2BClientError
 
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# Search validation
+# ---------------------------------------------------------------------------
+SEARCH_MIN_LENGTH: int = 3
+
+# SQL metacharacters that must be escaped so the query doesn't break
+_SEARCH_ESCAPE_RE = re.compile(r"([%_'])")
+
+
+def _validate_search(query: Optional[str]) -> Optional[str]:
+    """Validate and sanitise the search query.
+
+    Raises 400 when the query is shorter than the minimum length.
+    Escapes SQL metacharacters (% _ ') so the downstream B2B layer
+    receives a safe literal string.
+    """
+    if query is None or query.strip() == "":
+        return None
+
+    if len(query) < SEARCH_MIN_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "SHORT_SEARCH_QUERY",
+                "message": f"Search query must be at least {SEARCH_MIN_LENGTH} characters",
+            },
+        )
+
+    # Escape SQL metacharacters
+    return _SEARCH_ESCAPE_RE.sub(r"\\\1", query)
+
 
 # ---------------------------------------------------------------------------
 # Allowed sort values
@@ -172,6 +205,9 @@ async def get_products(
     if in_stock is not None:
         in_stock_bool = in_stock.lower() == "true"
 
+    # --- Validate and sanitise search query ---
+    safe_search = _validate_search(q)
+
     # --- Validate sort ---
     sort_by = "popularity"
     sort_order = "desc"
@@ -190,7 +226,7 @@ async def get_products(
     try:
         result = await b2b_client.get_products(
             category_id=category_id,
-            search=q,
+            search=safe_search,
             min_price=price_min,
             max_price=price_max,
             in_stock=in_stock_bool,

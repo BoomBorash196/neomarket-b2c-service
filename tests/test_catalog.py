@@ -789,3 +789,89 @@ def test_combined_filters(client: TestClient):
     # offset=50, limit=50 → page = 50//50 + 1 = 2
     assert call_kwargs["page"] == 2
     assert call_kwargs["page_size"] == 50
+
+
+# ======================================================================
+# US-CAT-02 — Text search for products
+# ======================================================================
+
+def test_search_returns_matching_products(client: TestClient):
+    """Happy path: search matches products by title and description."""
+    products = [
+        _make_product("p1", "Wireless Mouse", 25.0),
+        _make_product("p2", "Gaming Mouse Pro", 75.0),
+    ]
+
+    mock_result = _mock_b2b_products_result(products, total=2)
+
+    with patch(CATALOG_B2B) as mock_b2b:
+        mock_b2b.get_products = AsyncMock(return_value=mock_result)
+
+        resp = client.get(
+            "/api/v1/catalog/products",
+            params={"q": "mouse", "limit": 10, "offset": 0},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_count"] == 2
+    assert len(data["items"]) == 2
+
+    call_kwargs = mock_b2b.get_products.call_args.kwargs
+    assert call_kwargs["search"] == "mouse"
+
+
+def test_short_query_returns_400(client: TestClient):
+    """Query shorter than 3 characters → 400 SHORT_SEARCH_QUERY."""
+    resp = client.get(
+        "/api/v1/catalog/products",
+        params={"q": "ab", "limit": 10, "offset": 0},
+    )
+
+    assert resp.status_code == 400
+    data = resp.json()
+    assert data["code"] == "SHORT_SEARCH_QUERY"
+    assert "3" in data["message"]
+
+
+def test_special_chars_do_not_break_query(client: TestClient):
+    """Special characters (% _ ') are escaped and do not break the query."""
+    products = [_make_product("p1", "iPhone%15", 999.0)]
+    mock_result = _mock_b2b_products_result(products, total=1)
+
+    with patch(CATALOG_B2B) as mock_b2b:
+        mock_b2b.get_products = AsyncMock(return_value=mock_result)
+
+        # All three SQL metacharacters in one query
+        resp = client.get(
+            "/api/v1/catalog/products",
+            params={"q": "iPhone%15' and 1=1", "limit": 10, "offset": 0},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["items"]) == 1
+
+    call_kwargs = mock_b2b.get_products.call_args.kwargs
+    search_arg = call_kwargs["search"]
+    # Each special char must be backslash-escaped
+    assert "%" in search_arg or "\\%" in search_arg
+    assert "'" in search_arg or "\\'" in search_arg
+
+
+def test_empty_results_returns_200(client: TestClient):
+    """No matching products → 200 with an empty items list."""
+    mock_result = _mock_b2b_products_result([], total=0)
+
+    with patch(CATALOG_B2B) as mock_b2b:
+        mock_b2b.get_products = AsyncMock(return_value=mock_result)
+
+        resp = client.get(
+            "/api/v1/catalog/products",
+            params={"q": "zzzznonexistentzzzz", "limit": 10, "offset": 0},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_count"] == 0
+    assert len(data["items"]) == 0
