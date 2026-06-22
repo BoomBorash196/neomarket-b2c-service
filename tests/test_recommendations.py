@@ -1,15 +1,41 @@
 """Tests for recommendations endpoints."""
 
+from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
+from src.services.b2b_client import b2b_client
 
 
 def test_get_recommendations(client: TestClient):
-    """Test getting product recommendations."""
+    """Test getting product recommendations with mocked B2B."""
+    b2b_client.get_product_by_id = AsyncMock(return_value={
+        "product_id": "test_product_1",
+        "category_id": "cat1",
+        "parent_category_id": "cat_parent",
+    })
+    b2b_client.get_products_by_category = AsyncMock(return_value={
+        "products": [
+            {"product_id": "rec1", "title": "Rec 1", "main_image_url": "http://img", "min_price": 100.0, "is_available": True},
+            {"product_id": "rec2", "title": "Rec 2", "main_image_url": "http://img", "min_price": 200.0, "is_available": True},
+        ],
+        "total": 2,
+    })
+
     response = client.get("/api/v1/recommendations/products/test_product_1?limit=4")
-    # May fail without B2B or return empty recommendations
-    assert response.status_code in [200, 502, 504]
-    if response.status_code == 200:
-        data = response.json()
-        assert "current_product_id" in data
-        assert "recommendations" in data
-        assert "reason" in data
+    assert response.status_code == 200
+    data = response.json()
+    assert "current_product_id" in data
+    assert "recommendations" in data
+    assert "reason" in data
+    assert len(data["recommendations"]) == 2
+
+
+def test_get_recommendations_product_not_found(client: TestClient):
+    """Test recommendations when product not found."""
+    b2b_client.get_product_by_id = AsyncMock(return_value=None)
+
+    response = client.get("/api/v1/recommendations/products/nonexistent?limit=4")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["current_product_id"] == "nonexistent"
+    assert data["recommendations"] == []
+    assert data["reason"] == "Product not found"

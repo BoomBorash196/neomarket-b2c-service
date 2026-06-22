@@ -17,4 +17,4 @@ def test_docs_page(client: TestClient):
     """Test Swagger docs are accessible."""
     response = client.get("/docs")
     assert response.status_code == 200
-    assert "FastAPI" in response.text
+    assert "Swagger UI" in response.text

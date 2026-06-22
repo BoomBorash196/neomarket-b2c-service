@@ -59,7 +59,7 @@ async def add_to_wishlist(
     if not product_data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Product not found"
+            detail={"code": "PRODUCT_NOT_FOUND", "message": "Product not found"}
         )
 
     # Check if already in wishlist
@@ -74,7 +74,7 @@ async def add_to_wishlist(
     if existing.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Product already in wishlist"
+            detail={"code": "ALREADY_IN_WISHLIST", "message": "Product already in wishlist"}
         )
 
     new_item = WishlistItemModel(
@@ -108,7 +108,7 @@ async def remove_from_wishlist(
     if not item:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Wishlist item not found"
+            detail={"code": "WISHLIST_ITEM_NOT_FOUND", "message": "Wishlist item not found"}
         )
 
     await db.delete(item)

@@ -20,11 +20,11 @@ class OrderStatus(str, Enum):
 # --- Product schemas (from B2B) ---
 class ProductBasic(BaseModel):
     """Basic product info from B2B."""
-    product_id: str
-    title: str
+    id: str
+    name: str
     main_image_url: str
     min_price: float
-    is_available: bool
+    has_stock: bool
 
 
 class ProductDetail(ProductBasic):
@@ -41,12 +41,12 @@ class SKUInfo(BaseModel):
     Only fields that buyers are allowed to see.
     Sensitive seller data (cost_price, reserved_quantity, etc.) is explicitly excluded.
     """
-    sku_id: str
+    id: str
     color: Optional[str] = None
     size: Optional[str] = None
     other_specs: Optional[dict[str, str]] = None
     price: float
-    quantity_available: int
+    available_quantity: int
     is_active: bool
     in_stock: bool = True
     discount: float = 0.0
@@ -104,19 +104,9 @@ class CartWithUnavailable(BaseModel):
 
 
 # --- Order schemas ---
-class OrderItemCreate(BaseModel):
-    """Order item from cart."""
-    sku_id: str
-    quantity: int
-    price_at_order: float
-
-
 class OrderCreate(BaseModel):
-    """Create order from cart."""
+    """Create order from cart — no items/total needed; server computes from B2B."""
     user_id: str
-    idempotency_key: str
-    items: List[OrderItemCreate]
-    total_amount: float
 
 
 class OrderItem(BaseModel):
@@ -245,13 +235,25 @@ class FacetsResponse(BaseModel):
 
 
 # --- Catalog list / pagination schemas ---
-class ProductListResponse(BaseModel):
-    """Paginated product list with optional applied filters."""
-    products: List[ProductDetail]
-    total: int
-    page: int
-    page_size: int
-    filters_applied: Optional[dict] = None
+class ProductDetailSchema(BaseModel):
+    """B2C-safe product detail returned in catalog listings."""
+    id: str
+    name: str
+    main_image_url: str
+    min_price: float
+    has_stock: bool
+    description: str
+    images: List[str]
+    characteristics: dict[str, str]
+    skus: List["SKUInfo"]
+
+
+class PaginatedCatalogProducts(BaseModel):
+    """Paginated catalog product list per OpenAPI spec."""
+    items: List[ProductDetailSchema]
+    total_count: int
+    limit: int
+    offset: int
 
 
 # --- Recommendation schemas ---

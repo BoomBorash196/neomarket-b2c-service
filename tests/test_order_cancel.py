@@ -17,11 +17,11 @@ from src.services.b2b_client import b2b_client, B2BClientError
 async def test_cancel_paid_order_transitions_to_cancelled(
     client: TestClient, db_session
 ):
-    """Happy path: order in CREATED → CANCELLED, unreserve called."""
+    """Happy path: order in PAID → CANCELLED, unreserve called."""
     user_id = "test_user_cancel_ok"
     order = OrderModel(
         user_id=user_id,
-        status=OrderStatus.CREATED,
+        status=OrderStatus.PAID,
         total_amount=3000.0,
     )
     db_session.add(order)
@@ -39,7 +39,7 @@ async def test_cancel_paid_order_transitions_to_cancelled(
     await db_session.commit()
 
     # unreserve succeeds (negative quantity = release)
-    b2b_client.reserve_stock = AsyncMock(return_value={"success": True})
+    b2b_client.reserve_stock = AsyncMock(return_value={"success": [{"sku_id": "sku-001", "reserved": -3, "remaining": 12}]})
 
     response = client.post(
         f"/api/v1/orders/{order.order_id}/cancel?user_id={user_id}"
@@ -51,7 +51,6 @@ async def test_cancel_paid_order_transitions_to_cancelled(
     # Verify unreserve was called
     b2b_client.reserve_stock.assert_called_once()
     call_args = b2b_client.reserve_stock.call_args
-    # reserve_stock passes reservations as first positional arg to _request
     reservations = call_args[0][0]
     assert len(reservations) == 1
     assert reservations[0]["sku_id"] == "sku-001"
@@ -66,7 +65,7 @@ async def test_cancel_paid_order_transitions_to_cancelled(
 async def test_unreserve_failure_transitions_to_cancel_pending(
     client: TestClient, db_session
 ):
-    """B2B unreserve fails → order stays in current status (scaffold for CANCEL_PENDING)."""
+    """B2B unreserve fails → order transitions to CANCEL_PENDING."""
     user_id = "test_user_cancel_fail"
     order = OrderModel(
         user_id=user_id,
@@ -99,10 +98,8 @@ async def test_unreserve_failure_transitions_to_cancel_pending(
     assert response.status_code == 200
     data = response.json()
 
-    # Order status should change — if unreserve fails, order is left for retry
-    # In the current implementation, order stays in PAID (needs cancel-retry)
-    # This is the scaffold behavior — in production it would go to CANCEL_PENDING
-    # The key point: no exception propagated to user, unreserve attempt was made
+    # Order transitions to CANCEL_PENDING (not left in PAID)
+    assert data["status"] == OrderStatus.CANCEL_PENDING.value
     assert b2b_client.reserve_stock.called
 
 
@@ -114,11 +111,11 @@ async def test_unreserve_failure_transitions_to_cancel_pending(
 async def test_cancel_assembling_order_returns_409(
     client: TestClient, db_session
 ):
-    """Order in ASSEMBLING cannot be cancelled → 409 CANCEL_NOT_ALLOWED."""
-    user_id = "test_user_cancel_assembling"
+    """Order in DELIVERING cannot be cancelled → 409 CANCEL_NOT_ALLOWED."""
+    user_id = "test_user_cancel_delivering"
     order = OrderModel(
         user_id=user_id,
-        status=OrderStatus.ASSEMBLING,
+        status=OrderStatus.DELIVERING,
         total_amount=1000.0,
     )
     db_session.add(order)
@@ -132,8 +129,8 @@ async def test_cancel_assembling_order_returns_409(
     )
     assert response.status_code == 409
     data = response.json()
-    assert data["detail"]["error"] == "CANCEL_NOT_ALLOWED"
-    assert data["detail"]["current_status"] == "ASSEMBLING"
+    assert data["code"] == "CANCEL_NOT_ALLOWED"
+    assert data["current_status"] == "DELIVERING"
 
     # unreserve NOT called
     b2b_client.reserve_stock.assert_not_called()
@@ -164,7 +161,7 @@ async def test_other_user_order_returns_404(
     )
     assert response.status_code == 404
     data = response.json()
-    assert data["detail"]["error"] == "ORDER_NOT_FOUND"
+    assert data["code"] == "ORDER_NOT_FOUND"
 
 
 # =====================================================================
@@ -196,7 +193,7 @@ async def test_cancel_retry_success(
     ))
     await db_session.commit()
 
-    b2b_client.reserve_stock = AsyncMock(return_value={"success": True})
+    b2b_client.reserve_stock = AsyncMock(return_value={"success": [{"sku_id": "sku-retry", "reserved": -1, "remaining": 10}]})
 
     response = client.post(
         f"/api/v1/orders/{order.order_id}/cancel-retry?user_id={user_id}"
@@ -229,4 +226,4 @@ async def test_cancel_retry_wrong_status_returns_400(
     )
     assert response.status_code == 400
     data = response.json()
-    assert data["detail"]["error"] == "NOT_CANCEL_PENDING"
+    assert data["code"] == "NOT_CANCEL_PENDING"

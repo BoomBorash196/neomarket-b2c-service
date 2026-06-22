@@ -44,9 +44,24 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException):
+        detail = exc.detail
+        # If detail is a dict with 'code' and 'message', return as-is (preserving any extra fields)
+        if isinstance(detail, dict) and "code" in detail and "message" in detail:
+            # Build response preserving all fields from detail
+            response = {"code": detail["code"], "message": detail["message"]}
+            for k, v in detail.items():
+                if k not in ("code", "message"):
+                    response[k] = v
+            return JSONResponse(status_code=exc.status_code, content=response)
+        # Fallback: convert old format {error, detail} → {code, message}
+        if isinstance(detail, dict):
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"code": detail.get("error", "HTTP_ERROR"), "message": detail.get("detail", str(exc))},
+            )
         return JSONResponse(
             status_code=exc.status_code,
-            content={"detail": exc.detail, "error": getattr(exc, 'code', 'HTTP_ERROR')}
+            content={"code": "HTTP_ERROR", "message": str(detail)},
         )
 
     # Include routers

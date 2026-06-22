@@ -20,21 +20,24 @@ def _mock_cart_item(user_id: str, sku_id: str, quantity: int = 1):
 
 def _mock_sku(sku_id: str, price: float = 1000.0,
               quantity_available: int = 10, is_active: bool = True,
-              product_id: str = "prod-001", product_title: str = "Test Product") -> dict:
+              product_id: str = "prod-001", name: str = "Test Product") -> dict:
     return {
         "sku_id": sku_id,
         "product_id": product_id,
-        "product_title": product_title,
+        "name": name,
         "price": price,
         "quantity_available": quantity_available,
         "is_active": is_active,
     }
 
 
-def _mock_reserve_success(failed_items: list = None) -> dict:
+def _mock_reserve_success(failed: list = None) -> dict:
+    """B2B /inventory/reserve returns {"success": [...], "failed": [...]}."""
     return {
-        "success": failed_items is None,
-        "failed_items": failed_items or [],
+        "success": [{"sku_id": "x", "reserved": 1, "remaining": 9}] if failed is None else [],
+        "failed": failed or [],
+        "total_reserved": 1 if failed is None else 0,
+        "total_failed": len(failed or []),
     }
 
 
@@ -46,7 +49,7 @@ def _mock_reserve_success(failed_items: list = None) -> dict:
 async def test_checkout_creates_paid_order_with_fixed_prices(
     client: TestClient, db_session
 ):
-    """Happy path: order created with fixed snapshot prices in OrderItem."""
+    """Happy path: order created with PAID status and fixed snapshot prices in OrderItem."""
     user_id = "test_user_checkout"
     sku_1 = "sku-chk-001"
     sku_2 = "sku-chk-002"
@@ -58,8 +61,8 @@ async def test_checkout_creates_paid_order_with_fixed_prices(
     await db_session.commit()
 
     skus_data = {
-        sku_1: _mock_sku(sku_1, price=1000.0, product_id="prod-001", product_title="Widget A"),
-        sku_2: _mock_sku(sku_2, price=2500.0, product_id="prod-002", product_title="Widget B"),
+        sku_1: _mock_sku(sku_1, price=1000.0, product_id="prod-001", name="Widget A"),
+        sku_2: _mock_sku(sku_2, price=2500.0, product_id="prod-002", name="Widget B"),
     }
 
     b2b_client.get_skus_by_ids = AsyncMock(return_value=skus_data)
@@ -67,21 +70,15 @@ async def test_checkout_creates_paid_order_with_fixed_prices(
 
     payload = {
         "user_id": user_id,
-        "idempotency_key": idem_key,
-        "items": [
-            {"sku_id": sku_1, "quantity": 2, "price_at_order": 1000.0},
-            {"sku_id": sku_2, "quantity": 1, "price_at_order": 2500.0},
-        ],
-        "total_amount": 4500.0,
     }
 
-    response = client.post("/api/v1/orders", json=payload)
+    response = client.post("/api/v1/orders", json=payload, headers={"Idempotency-Key": idem_key})
     assert response.status_code == 200
     data = response.json()
 
-    # Order created
+    # Order created with PAID status
     assert data["user_id"] == user_id
-    assert data["status"] == OrderStatus.CREATED.value
+    assert data["status"] == OrderStatus.PAID.value
     assert data["total_amount"] == 4500.0  # 1000*2 + 2500*1
     assert len(data["items"]) == 2
 
@@ -133,24 +130,16 @@ async def test_partial_reserve_failure_returns_409(
 
     failed = [{"sku_id": sku_fail, "reason": "out_of_stock"}]
     b2b_client.get_skus_by_ids = AsyncMock(return_value=skus_data)
-    b2b_client.reserve_stock = AsyncMock(return_value=_mock_reserve_success(failed_items=failed))
+    b2b_client.reserve_stock = AsyncMock(return_value=_mock_reserve_success(failed=failed))
 
-    payload = {
-        "user_id": user_id,
-        "idempotency_key": idem_key,
-        "items": [
-            {"sku_id": sku_ok, "quantity": 1, "price_at_order": 100.0},
-            {"sku_id": sku_fail, "quantity": 1, "price_at_order": 200.0},
-        ],
-        "total_amount": 300.0,
-    }
+    payload = {"user_id": user_id}
 
-    response = client.post("/api/v1/orders", json=payload)
+    response = client.post("/api/v1/orders", json=payload, headers={"Idempotency-Key": idem_key})
     assert response.status_code == 409
     data = response.json()
-    assert data["detail"]["error"] == "RESERVE_FAILED"
-    assert len(data["detail"]["failed_items"]) == 1
-    assert data["detail"]["failed_items"][0]["sku_id"] == sku_fail
+    assert data["code"] == "RESERVE_FAILED"
+    assert len(data.get("failed_items", [])) == 1
+    assert data["failed_items"][0]["sku_id"] == sku_fail
 
     # No order created — all-or-nothing
     result = await db_session.execute(
@@ -179,20 +168,15 @@ async def test_idempotency_returns_existing_order(
     b2b_client.get_skus_by_ids = AsyncMock(return_value=skus_data)
     b2b_client.reserve_stock = AsyncMock(return_value=_mock_reserve_success())
 
-    payload = {
-        "user_id": user_id,
-        "idempotency_key": idem_key,
-        "items": [{"sku_id": sku_id, "quantity": 1, "price_at_order": 500.0}],
-        "total_amount": 500.0,
-    }
+    payload = {"user_id": user_id}
 
     # First call
-    r1 = client.post("/api/v1/orders", json=payload)
+    r1 = client.post("/api/v1/orders", json=payload, headers={"Idempotency-Key": idem_key})
     assert r1.status_code == 200
     order_id_1 = r1.json()["order_id"]
 
     # Second call with same key — should return the same order (idempotent)
-    r2 = client.post("/api/v1/orders", json=payload)
+    r2 = client.post("/api/v1/orders", json=payload, headers={"Idempotency-Key": idem_key})
     assert r2.status_code == 200
     order_id_2 = r2.json()["order_id"]
 
@@ -225,17 +209,12 @@ async def test_b2b_unavailable_returns_503(
         side_effect=B2BClientError(status_code=503, message="Service unavailable")
     )
 
-    payload = {
-        "user_id": user_id,
-        "idempotency_key": "idem-503",
-        "items": [{"sku_id": sku_id, "quantity": 1, "price_at_order": 100.0}],
-        "total_amount": 100.0,
-    }
+    payload = {"user_id": user_id}
 
-    response = client.post("/api/v1/orders", json=payload)
+    response = client.post("/api/v1/orders", json=payload, headers={"Idempotency-Key": "idem-503"})
     assert response.status_code == 503
     data = response.json()
-    assert data["detail"]["error"] == "B2B_UNAVAILABLE"
+    assert data["code"] == "B2B_UNAVAILABLE"
 
     # No order created
     result = await db_session.execute(
@@ -255,17 +234,12 @@ async def test_checkout_empty_cart_returns_400(
     """Empty cart → 400 with EMPTY_CART error."""
     user_id = "test_user_empty"
 
-    payload = {
-        "user_id": user_id,
-        "idempotency_key": "idem-empty",
-        "items": [],
-        "total_amount": 0.0,
-    }
+    payload = {"user_id": user_id}
 
-    response = client.post("/api/v1/orders", json=payload)
+    response = client.post("/api/v1/orders", json=payload, headers={"Idempotency-Key": "idem-empty"})
     assert response.status_code == 400
     data = response.json()
-    assert data["detail"]["error"] == "EMPTY_CART"
+    assert data["code"] == "EMPTY_CART"
 
 
 # =====================================================================
@@ -280,7 +254,7 @@ async def test_get_order_with_items(
     user_id = "test_user_get"
 
     # Create order directly
-    order = OrderModel(user_id=user_id, status=OrderStatus.CREATED, total_amount=3000.0)
+    order = OrderModel(user_id=user_id, status=OrderStatus.PAID, total_amount=3000.0)
     db_session.add(order)
     await db_session.flush()
 
