@@ -72,9 +72,9 @@ def _enrich_cart_items(
             "product_id": sku_info.get("product_id", ""),
             "product_title": sku_info.get("product_title", ""),
             "sku_info": SKUInfo(
-                sku_id=ci.sku_id,
+                id=ci.sku_id,
                 price=sku_info["price"],
-                quantity_available=qty_available,
+                available_quantity=qty_available,
                 is_active=is_active,
                 in_stock=True,
                 discount=sku_info.get("discount", 0.0),
@@ -141,10 +141,10 @@ async def get_cart(
 
 
 # =====================================================================
-# POST /api/v1/cart
+# POST /api/v1/cart/items
 # =====================================================================
 
-@router.post("", response_model=CartWithUnavailable)
+@router.post("/items", response_model=CartWithUnavailable)
 async def add_to_cart(
     item: CartItemCreate,
     user_id: str = Query(..., description="User ID or guest session ID"),
@@ -160,26 +160,26 @@ async def add_to_cart(
     except B2BClientError:
         raise HTTPException(
             status_code=502,
-            detail={"error": "B2B_UNAVAILABLE", "message": "Cannot validate SKU"},
+            detail={"code": "B2B_UNAVAILABLE", "message": "Cannot validate SKU"},
         )
 
     if not sku_data:
         raise HTTPException(
             status_code=404,
-            detail={"error": "SKU_NOT_FOUND", "message": f"SKU {item.sku_id} not found"},
+            detail={"code": "SKU_NOT_FOUND", "message": f"SKU {item.sku_id} not found"},
         )
 
     if not sku_data.get("is_active"):
         raise HTTPException(
             status_code=400,
-            detail={"error": "SKU_NOT_ACTIVE", "message": f"SKU {item.sku_id} is not available"},
+            detail={"code": "SKU_NOT_ACTIVE", "message": f"SKU {item.sku_id} is not available"},
         )
 
     qty_available = sku_data.get("quantity_available", 0)
     if qty_available <= 0:
         raise HTTPException(
             status_code=400,
-            detail={"error": "SKU_OUT_OF_STOCK", "message": f"SKU {item.sku_id} is out of stock"},
+            detail={"code": "SKU_OUT_OF_STOCK", "message": f"SKU {item.sku_id} is out of stock"},
         )
 
     # Check if already in cart — increment quantity
@@ -197,7 +197,7 @@ async def add_to_cart(
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "error": "QUANTITY_EXCEEDED",
+                    "code": "QUANTITY_EXCEEDED",
                     "message": f"Total quantity {new_qty} exceeds available {qty_available}",
                 },
             )
@@ -229,20 +229,20 @@ async def add_to_cart(
 
 
 # =====================================================================
-# PUT /api/v1/cart/{cart_item_id}
+# PATCH /api/v1/cart/items/{sku_id}
 # =====================================================================
 
-@router.put("/{cart_item_id}", response_model=CartWithUnavailable)
+@router.patch("/items/{sku_id}", response_model=CartWithUnavailable)
 async def update_cart_item(
-    cart_item_id: int,
+    sku_id: str,
     quantity: int = Query(..., ge=1, description="New quantity"),
     user_id: str = Query(..., description="User ID or guest session ID"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update quantity of a cart item."""
+    """Update quantity of a cart item by SKU."""
     result = await db.execute(
         select(CartItemModel).where(
-            (CartItemModel.cart_item_id == cart_item_id) &
+            (CartItemModel.sku_id == sku_id) &
             (CartItemModel.user_id == user_id)
         )
     )
@@ -251,22 +251,22 @@ async def update_cart_item(
     if not cart_item:
         raise HTTPException(
             status_code=404,
-            detail={"error": "ITEM_NOT_FOUND", "message": "Cart item not found"},
+            detail={"code": "ITEM_NOT_FOUND", "message": "Cart item not found"},
         )
 
     # Validate against current B2B stock
     try:
-        sku_data = await b2b_client.get_sku_by_id(cart_item.sku_id)
+        sku_data = await b2b_client.get_sku_by_id(sku_id)
     except B2BClientError:
         raise HTTPException(
             status_code=502,
-            detail={"error": "B2B_UNAVAILABLE", "message": "Cannot validate stock"},
+            detail={"code": "B2B_UNAVAILABLE", "message": "Cannot validate stock"},
         )
 
     if not sku_data:
         raise HTTPException(
             status_code=404,
-            detail={"error": "SKU_NOT_FOUND", "message": "SKU no longer exists"},
+            detail={"code": "SKU_NOT_FOUND", "message": "SKU no longer exists"},
         )
 
     qty_available = sku_data.get("quantity_available", 0)
@@ -274,7 +274,7 @@ async def update_cart_item(
         raise HTTPException(
             status_code=400,
             detail={
-                "error": "QUANTITY_EXCEEDED",
+                "code": "QUANTITY_EXCEEDED",
                 "message": f"Quantity {quantity} exceeds available {qty_available}",
             },
         )
@@ -287,19 +287,19 @@ async def update_cart_item(
 
 
 # =====================================================================
-# DELETE /api/v1/cart/{cart_item_id}
+# DELETE /api/v1/cart/items/{sku_id}
 # =====================================================================
 
-@router.delete("/{cart_item_id}", response_model=CartWithUnavailable)
+@router.delete("/items/{sku_id}", response_model=CartWithUnavailable)
 async def remove_from_cart(
-    cart_item_id: int,
+    sku_id: str,
     user_id: str = Query(..., description="User ID or guest session ID"),
     db: AsyncSession = Depends(get_db),
 ):
     """Remove item from cart."""
     result = await db.execute(
         select(CartItemModel).where(
-            (CartItemModel.cart_item_id == cart_item_id) &
+            (CartItemModel.sku_id == sku_id) &
             (CartItemModel.user_id == user_id)
         )
     )
@@ -308,7 +308,7 @@ async def remove_from_cart(
     if not cart_item:
         raise HTTPException(
             status_code=404,
-            detail={"error": "ITEM_NOT_FOUND", "message": "Cart item not found"},
+            detail={"code": "ITEM_NOT_FOUND", "message": "Cart item not found"},
         )
 
     await db.delete(cart_item)
@@ -321,7 +321,7 @@ async def remove_from_cart(
 # DELETE /api/v1/cart
 # =====================================================================
 
-@router.delete("", response_model=CartWithUnavailable)
+@router.delete("", status_code=204)
 async def clear_cart(
     user_id: str = Query(..., description="User ID or guest session ID"),
     db: AsyncSession = Depends(get_db),
@@ -331,8 +331,6 @@ async def clear_cart(
         CartItemModel.__table__.delete().where(CartItemModel.user_id == user_id)
     )
     await db.commit()
-
-    return _build_cart_response(user_id, [], [])
 
 
 # =====================================================================

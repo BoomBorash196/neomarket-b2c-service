@@ -38,11 +38,11 @@ async def get_recommendations(product_id: str, limit: int = 4, db: AsyncSession 
     for p in products.get("products", []):
         if p.get("product_id") != product_id and len(recommendations) < limit:
             recommendations.append(ProductBasic(
-                product_id=p.get("product_id", ""),
-                title=p.get("title", ""),
+                id=p.get("product_id", ""),
+                name=p.get("title", ""),
                 main_image_url=p.get("main_image_url", ""),
                 min_price=p.get("min_price", 0.0),
-                is_available=p.get("is_available", True)
+                has_stock=p.get("is_available", True)
             ))
 
     # If not enough recommendations, try parent category
@@ -55,17 +55,17 @@ async def get_recommendations(product_id: str, limit: int = 4, db: AsyncSession 
                 page_size=(limit - len(recommendations)) * 2
             )
             
-            existing_ids = {p.product_id for p in recommendations}
+            existing_ids = {p.id for p in recommendations}
             for p in more_products.get("products", []):
                 if (p.get("product_id") != product_id and 
                     p.get("product_id") not in existing_ids and
                     len(recommendations) < limit):
                     recommendations.append(ProductBasic(
-                        product_id=p.get("product_id", ""),
-                        title=p.get("title", ""),
+                        id=p.get("product_id", ""),
+                        name=p.get("title", ""),
                         main_image_url=p.get("main_image_url", ""),
                         min_price=p.get("min_price", 0.0),
-                        is_available=p.get("is_available", True)
+                        has_stock=p.get("is_available", True)
                     ))
                     existing_ids.add(p.get("product_id"))
 

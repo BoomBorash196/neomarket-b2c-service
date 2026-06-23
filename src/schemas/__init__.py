@@ -14,16 +14,17 @@ class OrderStatus(str, Enum):
     DELIVERING = "DELIVERING"
     DELIVERED = "DELIVERED"
     CANCELLED = "CANCELLED"
+    CANCEL_PENDING = "CANCEL_PENDING"  # unreserve failed, retry scheduled
 
 
 # --- Product schemas (from B2B) ---
 class ProductBasic(BaseModel):
     """Basic product info from B2B."""
-    product_id: str
-    title: str
+    id: str
+    name: str
     main_image_url: str
     min_price: float
-    is_available: bool
+    has_stock: bool
 
 
 class ProductDetail(ProductBasic):
@@ -40,12 +41,12 @@ class SKUInfo(BaseModel):
     Only fields that buyers are allowed to see.
     Sensitive seller data (cost_price, reserved_quantity, etc.) is explicitly excluded.
     """
-    sku_id: str
+    id: str
     color: Optional[str] = None
     size: Optional[str] = None
     other_specs: Optional[dict[str, str]] = None
     price: float
-    quantity_available: int
+    available_quantity: int
     is_active: bool
     in_stock: bool = True
     discount: float = 0.0
@@ -103,28 +104,21 @@ class CartWithUnavailable(BaseModel):
 
 
 # --- Order schemas ---
-class OrderItemCreate(BaseModel):
-    """Order item from cart."""
-    sku_id: str
-    quantity: int
-    price_at_order: float
-
-
 class OrderCreate(BaseModel):
-    """Create order from cart."""
+    """Create order from cart — no items/total needed; server computes from B2B."""
     user_id: str
-    items: List[OrderItemCreate]
-    total_amount: float
 
 
 class OrderItem(BaseModel):
-    """Order item details."""
+    """Order item details — historical snapshot at purchase time."""
     order_item_id: int
     order_id: int
     sku_id: str
+    sku_name: str
+    product_id: str
     product_title: str
     quantity: int
-    price: float
+    unit_price: float
 
 
 class Order(BaseModel):
@@ -169,6 +163,28 @@ class Wishlist(BaseModel):
     items: List[WishlistItem]
 
 
+# --- Subscription schemas ---
+class NotifyOn(str, Enum):
+    """Types of product events to subscribe to."""
+    IN_STOCK = "in_stock"  # product is back in stock
+    LOW_STOCK = "low_stock"  # product stock is running low
+
+
+class SubscriptionCreate(BaseModel):
+    """Create a product availability subscription."""
+    sku_id: str
+    notify_on: NotifyOn
+
+
+class Subscription(BaseModel):
+    """Subscription response."""
+    subscription_id: int
+    user_id: str
+    sku_id: str
+    notify_on: str
+    created_at: datetime
+
+
 # --- Category schemas ---
 class CategoryNode(BaseModel):
     """Category tree node."""
@@ -176,6 +192,25 @@ class CategoryNode(BaseModel):
     name: str
     parent_id: Optional[str] = None
     children: List["CategoryNode"] = []
+
+
+class CategoryDetail(BaseModel):
+    """Detailed info about a single category."""
+    category_id: str
+    name: str
+    parent_id: Optional[str] = None
+
+
+class BreadcrumbItem(BaseModel):
+    """A single item in the breadcrumbs chain."""
+    category_id: str
+    name: str
+    parent_id: Optional[str] = None
+
+
+class BreadcrumbsResponse(BaseModel):
+    """Breadcrumbs path from root to target category."""
+    items: List[BreadcrumbItem]
 
 
 # --- Collection/Banner schemas ---
@@ -187,6 +222,14 @@ class Banner(BaseModel):
     link_url: str
     priority: int
     is_active: bool
+    starts_at: Optional[datetime] = None
+    ends_at: Optional[datetime] = None
+
+
+class BannerClickCreate(BaseModel):
+    """Record a banner click for CTR analytics."""
+    banner_id: int
+    user_id: Optional[str] = None
 
 
 class CollectionProduct(BaseModel):
@@ -204,6 +247,7 @@ class Collection(BaseModel):
     description: Optional[str] = None
     products: List[CollectionProduct]
     max_display: int = 8
+    unavailable_ids: List[str] = []  # product_ids unavailable in B2B
 
 
 # --- Filter / Facet schemas ---
@@ -241,13 +285,25 @@ class FacetsResponse(BaseModel):
 
 
 # --- Catalog list / pagination schemas ---
-class ProductListResponse(BaseModel):
-    """Paginated product list with optional applied filters."""
-    products: List[ProductDetail]
-    total: int
-    page: int
-    page_size: int
-    filters_applied: Optional[dict] = None
+class ProductDetailSchema(BaseModel):
+    """B2C-safe product detail returned in catalog listings."""
+    id: str
+    name: str
+    main_image_url: str
+    min_price: float
+    has_stock: bool
+    description: str
+    images: List[str]
+    characteristics: dict[str, str]
+    skus: List["SKUInfo"]
+
+
+class PaginatedCatalogProducts(BaseModel):
+    """Paginated catalog product list per OpenAPI spec."""
+    items: List[ProductDetailSchema]
+    total_count: int
+    limit: int
+    offset: int
 
 
 # --- Recommendation schemas ---

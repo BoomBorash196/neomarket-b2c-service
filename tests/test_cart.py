@@ -84,7 +84,7 @@ async def test_add_sku_increments_quantity_if_already_in_cart(
     b2b_client.get_sku_by_id = AsyncMock(return_value=mock_data)
     b2b_client.get_skus_by_ids = AsyncMock(return_value={sku_id: mock_data})
     client.post(
-        f"/api/v1/cart?user_id={user_id}",
+        f"/api/v1/cart/items?user_id={user_id}",
         json={"sku_id": sku_id, "quantity": 2},
     )
 
@@ -102,7 +102,7 @@ async def test_add_sku_increments_quantity_if_already_in_cart(
     b2b_client.get_sku_by_id = AsyncMock(return_value=mock_data)
     b2b_client.get_skus_by_ids = AsyncMock(return_value={sku_id: mock_data})
     client.post(
-        f"/api/v1/cart?user_id={user_id}",
+        f"/api/v1/cart/items?user_id={user_id}",
         json={"sku_id": sku_id, "quantity": 3},
     )
 
@@ -290,5 +290,5 @@ async def test_idor_protection_cart_access(
     assert data["total_items"] == 0
 
     # User A tries to DELETE B's cart item
-    response = client.delete(f"/api/v1/cart/1?user_id={user_a}")
+    response = client.delete(f"/api/v1/cart/items/sku-secret?user_id={user_a}")
     assert response.status_code == 404

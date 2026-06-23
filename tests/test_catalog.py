@@ -3,7 +3,7 @@
 Covers:
   - catalog_returns_filtered_sorted_products   (happy path)
   - facets_return_counts_per_filter_value      (facets)
-  - invalid_sort_returns_400                   (bad sort field)
+  - invalid_sort_returns_400                   (bad sort)
   - b2b_unavailable_returns_502                (B2B down → 502)
 """
 
@@ -20,10 +20,7 @@ from src.main import app
 # ======================================================================
 # Patching strategy
 # ======================================================================
-# catalog.py does: from src.services.b2b_client import b2b_client
-# So we must patch src.routes.catalog.b2b_client, NOT src.services.b2b_client.b2b_client.
-
-CATALOG_MODULE = "src.routes.catalog.b2b_client"
+CATALOG_B2B = "src.routes.catalog.b2b_client"
 
 
 # ======================================================================
@@ -72,7 +69,6 @@ def _mock_b2b_facets_result(facets_dict):
 
 def test_catalog_returns_filtered_sorted_products(client: TestClient):
     """Happy path: category filter + sort by price asc + pagination work."""
-
     products = [
         _make_product("p1", "Phone A", 100.0),
         _make_product("p2", "Phone B", 200.0),
@@ -81,82 +77,80 @@ def test_catalog_returns_filtered_sorted_products(client: TestClient):
 
     mock_result = _mock_b2b_products_result(products, total=3)
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_products = AsyncMock(return_value=mock_result)
 
         resp = client.get(
             "/api/v1/catalog/products",
             params={
-                "category_id": "cat1",
-                "sort_by": "price",
-                "sort_order": "asc",
-                "page": 1,
-                "page_size": 20,
+                "filter[category_id]": "cat1",
+                "sort": "price_asc",
+                "limit": 20,
+                "offset": 0,
             },
         )
 
     assert resp.status_code == 200
     data = resp.json()
 
-    # Pagination
-    assert data["total"] == 3
-    assert data["page"] == 1
-    assert data["page_size"] == 20
+    # Pagination — new schema: items, total_count, limit, offset
+    assert data["total_count"] == 3
+    assert data["limit"] == 20
+    assert data["offset"] == 0
 
     # Products returned
-    assert len(data["products"]) == 3
+    assert len(data["items"]) == 3
 
     # Sort order (price asc)
-    prices = [p["min_price"] for p in data["products"]]
+    prices = [p["min_price"] for p in data["items"]]
     assert prices == sorted(prices)
 
-    # Filters applied
-    assert data["filters_applied"] is not None
-    assert data["filters_applied"]["category_id"] == "cat1"
+    # Verify params passed through to B2B
+    call_kwargs = mock_b2b.get_products.call_args.kwargs
+    assert call_kwargs["category_id"] == "cat1"
+    assert call_kwargs["sort_by"] == "price"
+    assert call_kwargs["sort_order"] == "asc"
 
 
 def test_catalog_returns_filtered_sorted_products_in_stock(client: TestClient):
     """Happy path: in_stock=True filters to available products only."""
-
     products = [
         _make_product("p1", "Available", 50.0, available=True),
     ]
 
     mock_result = _mock_b2b_products_result(products, total=1)
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_products = AsyncMock(return_value=mock_result)
 
         resp = client.get(
             "/api/v1/catalog/products",
-            params={"in_stock": True, "page": 1, "page_size": 10},
+            params={"filter[in_stock]": "true", "limit": 10, "offset": 0},
         )
 
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data["products"]) == 1
-    assert data["products"][0]["is_available"] is True
+    assert len(data["items"]) == 1
+    assert data["items"][0]["has_stock"] is True
 
-    # Verify in_stock was passed through
     call_kwargs = mock_b2b.get_products.call_args.kwargs
     assert call_kwargs["in_stock"] is True
 
 
 def test_catalog_price_range_filter(client: TestClient):
-    """Happy path: min_price / max_price range filter."""
-
+    """Happy path: min_price / max_price range filter via deepObject."""
     products = [
         _make_product("p1", "Mid product", 150.0),
     ]
 
     mock_result = _mock_b2b_products_result(products, total=1)
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_products = AsyncMock(return_value=mock_result)
 
         resp = client.get(
             "/api/v1/catalog/products",
-            params={"min_price": 100, "max_price": 200, "page": 1, "page_size": 10},
+            params={"filter[price_min]": 100, "filter[price_max]": 200, "limit": 10, "offset": 0},
         )
 
     assert resp.status_code == 200
@@ -166,20 +160,19 @@ def test_catalog_price_range_filter(client: TestClient):
 
 
 def test_catalog_search_filter(client: TestClient):
-    """Happy path: search by query text."""
-
+    """Happy path: search by query text using `q` param."""
     products = [
         _make_product("p1", "Wireless Mouse", 25.0),
     ]
 
     mock_result = _mock_b2b_products_result(products, total=1)
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_products = AsyncMock(return_value=mock_result)
 
         resp = client.get(
             "/api/v1/catalog/products",
-            params={"search": "mouse", "page": 1, "page_size": 10},
+            params={"q": "mouse", "limit": 10, "offset": 0},
         )
 
     assert resp.status_code == 200
@@ -188,17 +181,16 @@ def test_catalog_search_filter(client: TestClient):
 
 
 def test_catalog_brand_filter(client: TestClient):
-    """Happy path: brand slug filter."""
-
+    """Happy path: brand slug filter via deepObject."""
     products = [_make_product("p1", "Apple Phone", 999.0)]
     mock_result = _mock_b2b_products_result(products, total=1)
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_products = AsyncMock(return_value=mock_result)
 
         resp = client.get(
             "/api/v1/catalog/products",
-            params={"brand": "apple", "page": 1, "page_size": 10},
+            params={"filter[brand]": "apple", "limit": 10, "offset": 0},
         )
 
     assert resp.status_code == 200
@@ -207,46 +199,44 @@ def test_catalog_brand_filter(client: TestClient):
 
 
 def test_catalog_empty_results(client: TestClient):
-    """Happy path: no products match → empty list, total=0."""
-
+    """Happy path: no products match → empty list, total_count=0."""
     mock_result = _mock_b2b_products_result([], total=0)
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_products = AsyncMock(return_value=mock_result)
 
         resp = client.get(
             "/api/v1/catalog/products",
-            params={"category_id": "nonexistent", "page": 1, "page_size": 10},
+            params={"filter[category_id]": "nonexistent", "limit": 10, "offset": 0},
         )
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["total"] == 0
-    assert len(data["products"]) == 0
+    assert data["total_count"] == 0
+    assert len(data["items"]) == 0
 
 
-def test_catalog_page_size_limit(client: TestClient):
-    """Edge: page_size=100 accepted, page_size=101 rejected (422)."""
-
+def test_catalog_limit_max(client: TestClient):
+    """Edge: limit=100 accepted, limit=101 rejected (422)."""
     products = [_make_product("p1", "X", 10.0)]
     mock_result = _mock_b2b_products_result(products, total=1)
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_products = AsyncMock(return_value=mock_result)
 
         resp = client.get(
             "/api/v1/catalog/products",
-            params={"page_size": 100, "page": 1},
+            params={"limit": 100, "offset": 0},
         )
 
     assert resp.status_code == 200
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_products = AsyncMock(return_value=mock_result)
 
         resp = client.get(
             "/api/v1/catalog/products",
-            params={"page_size": 101, "page": 1},
+            params={"limit": 101, "offset": 0},
         )
 
     assert resp.status_code == 422
@@ -258,7 +248,6 @@ def test_catalog_page_size_limit(client: TestClient):
 
 def test_facets_return_counts_per_filter_value(client: TestClient):
     """Facets endpoint returns correct counts per filter value."""
-
     facets_data = {
         "brand": [
             {"value": "apple", "label": "Apple", "count": 45},
@@ -278,12 +267,12 @@ def test_facets_return_counts_per_filter_value(client: TestClient):
         ],
     }
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_facets = AsyncMock(return_value=_mock_b2b_facets_result(facets_data))
 
         resp = client.get(
             "/api/v1/catalog/facets",
-            params={"category_id": "cat1"},
+            params={"filter[category_id]": "cat1"},
         )
 
     assert resp.status_code == 200
@@ -291,7 +280,6 @@ def test_facets_return_counts_per_filter_value(client: TestClient):
     assert data["category_id"] == "cat1"
     assert len(data["facets"]) == 4
 
-    # Verify counts preserved
     brand_facet = next(f for f in data["facets"] if f["name"] == "brand")
     assert len(brand_facet["values"]) == 2
     assert brand_facet["values"][0]["count"] == 45
@@ -299,20 +287,19 @@ def test_facets_return_counts_per_filter_value(client: TestClient):
 
 
 def test_facets_with_price_range_filter(client: TestClient):
-    """Facets respect min_price / max_price filter params."""
-
+    """Facets respect price_min / price_max filter params."""
     facets_data = {
         "brand": [
             {"value": "apple", "label": "Apple", "count": 5},
         ],
     }
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_facets = AsyncMock(return_value=_mock_b2b_facets_result(facets_data))
 
         resp = client.get(
             "/api/v1/catalog/facets",
-            params={"min_price": 100, "max_price": 500, "category_id": "cat1"},
+            params={"filter[price_min]": 100, "filter[price_max]": 500, "filter[category_id]": "cat1"},
         )
 
     assert resp.status_code == 200
@@ -324,19 +311,18 @@ def test_facets_with_price_range_filter(client: TestClient):
 
 def test_facets_with_in_stock_filter(client: TestClient):
     """Facets respect in_stock=True filter."""
-
     facets_data = {
         "brand": [
             {"value": "x", "label": "X", "count": 10},
         ],
     }
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_facets = AsyncMock(return_value=_mock_b2b_facets_result(facets_data))
 
         resp = client.get(
             "/api/v1/catalog/facets",
-            params={"in_stock": True, "category_id": "cat1"},
+            params={"filter[in_stock]": "true", "filter[category_id]": "cat1"},
         )
 
     assert resp.status_code == 200
@@ -349,47 +335,93 @@ def test_facets_with_in_stock_filter(client: TestClient):
 # ======================================================================
 
 def test_invalid_sort_returns_400(client: TestClient):
-    """Invalid sort_by returns 400 with list of allowed values."""
-
+    """Invalid sort returns 400 with list of allowed values."""
     products = [_make_product("p1", "X", 10.0)]
     mock_result = _mock_b2b_products_result(products, total=1)
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_products = AsyncMock(return_value=mock_result)
 
         resp = client.get(
             "/api/v1/catalog/products",
-            params={"sort_by": "nonexistent_field", "page": 1, "page_size": 10},
+            params={"sort": "nonexistent", "limit": 10, "offset": 0},
         )
 
     assert resp.status_code == 400
     data = resp.json()
-    assert data["detail"]["error"] == "INVALID_SORT_FIELD"
-    assert "nonexistent_field" in data["detail"]["message"]
-    assert "price" in data["detail"]["allowed"]
-    assert "title" in data["detail"]["allowed"]
-    assert "popularity" in data["detail"]["allowed"]
+    assert data["code"] == "INVALID_SORT"
+    assert "nonexistent" in data["message"]
+    assert "price_asc" in data["message"]
+    assert "price_desc" in data["message"]
+    assert "popularity" in data["message"]
+    assert "new" in data["message"]
 
 
-def test_invalid_sort_order_returns_400(client: TestClient):
-    """Invalid sort_order returns 400."""
-
+def test_sort_price_asc(client: TestClient):
+    """Sort=price_asc maps to sort_by=price, sort_order=asc for B2B."""
     products = [_make_product("p1", "X", 10.0)]
     mock_result = _mock_b2b_products_result(products, total=1)
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_products = AsyncMock(return_value=mock_result)
 
         resp = client.get(
             "/api/v1/catalog/products",
-            params={"sort_by": "price", "sort_order": "invalid", "page": 1, "page_size": 10},
+            params={"sort": "price_asc", "limit": 10, "offset": 0},
         )
 
-    assert resp.status_code == 400
-    data = resp.json()
-    assert data["detail"]["error"] == "INVALID_SORT_ORDER"
-    assert "asc" in data["detail"]["allowed"]
-    assert "desc" in data["detail"]["allowed"]
+    assert resp.status_code == 200
+    call_kwargs = mock_b2b.get_products.call_args.kwargs
+    assert call_kwargs["sort_by"] == "price"
+    assert call_kwargs["sort_order"] == "asc"
+
+
+def test_sort_new(client: TestClient):
+    """Sort=new maps to sort_by=created_at, sort_order=desc for B2B."""
+    products = [_make_product("p1", "X", 10.0)]
+    mock_result = _mock_b2b_products_result(products, total=1)
+
+    with patch(CATALOG_B2B) as mock_b2b:
+        mock_b2b.get_products = AsyncMock(return_value=mock_result)
+
+        resp = client.get(
+            "/api/v1/catalog/products",
+            params={"sort": "new", "limit": 10, "offset": 0},
+        )
+
+    assert resp.status_code == 200
+    call_kwargs = mock_b2b.get_products.call_args.kwargs
+    assert call_kwargs["sort_by"] == "created_at"
+    assert call_kwargs["sort_order"] == "desc"
+
+
+def test_default_sort_is_popularity(client: TestClient):
+    """Default sort (no sort param) is popularity desc."""
+    products = [_make_product("p1", "X", 10.0)]
+    mock_result = _mock_b2b_products_result(products, total=1)
+
+    with patch(CATALOG_B2B) as mock_b2b:
+        mock_b2b.get_products = AsyncMock(return_value=mock_result)
+
+        resp = client.get(
+            "/api/v1/catalog/products",
+            params={"limit": 10, "offset": 0},
+        )
+
+    assert resp.status_code == 200
+    call_kwargs = mock_b2b.get_products.call_args.kwargs
+    assert call_kwargs["sort_by"] == "popularity"
+    assert call_kwargs["sort_order"] == "desc"
+
+
+def _b2b_error_mock(message: str = "Service Unavailable"):
+    """Create an async mock that raises B2BClientError."""
+    from src.services.b2b_client import B2BClientError
+
+    async def _raise(*args, **kwargs):
+        raise B2BClientError(status_code=503, message=message)
+
+    return _raise
 
 
 # ======================================================================
@@ -398,96 +430,78 @@ def test_invalid_sort_order_returns_400(client: TestClient):
 
 def test_b2b_unavailable_returns_502_products(client: TestClient):
     """When B2B is unavailable, GET /products returns 502."""
-
-    from src.services.b2b_client import B2BClientError
-
-    with patch(CATALOG_MODULE) as mock_b2b:
-        mock_b2b.get_products = AsyncMock(
-            side_effect=B2BClientError(status_code=503, message="Service Unavailable")
-        )
-
+    with patch("src.routes.catalog.b2b_client.get_products", _b2b_error_mock()):
         resp = client.get(
             "/api/v1/catalog/products",
-            params={"category_id": "cat1", "page": 1, "page_size": 10},
+            params={"filter[category_id]": "cat1", "limit": 10, "offset": 0},
         )
 
     assert resp.status_code == 502
     data = resp.json()
-    assert data["detail"]["error"] == "B2B_UNAVAILABLE"
-    assert "Service Unavailable" in data["detail"]["message"]
+    assert data["code"] == "B2B_UNAVAILABLE"
+    assert "Service Unavailable" in data["message"]
 
 
 def test_b2b_unavailable_returns_502_facets(client: TestClient):
     """When B2B is unavailable, GET /facets returns 502."""
-
-    from src.services.b2b_client import B2BClientError
-
-    with patch(CATALOG_MODULE) as mock_b2b:
-        mock_b2b.get_facets = AsyncMock(
-            side_effect=B2BClientError(status_code=503, message="Service Unavailable")
-        )
-
+    with patch("src.routes.catalog.b2b_client.get_facets", _b2b_error_mock()):
         resp = client.get(
             "/api/v1/catalog/facets",
-            params={"category_id": "cat1"},
+            params={"filter[category_id]": "cat1"},
         )
 
     assert resp.status_code == 502
     data = resp.json()
-    assert data["detail"]["error"] == "B2B_UNAVAILABLE"
+    assert data["code"] == "B2B_UNAVAILABLE"
 
 
 def test_b2b_unavailable_returns_502_product_detail(client: TestClient):
     """When B2B is unavailable, GET /products/{id} returns 502."""
-
-    from src.services.b2b_client import B2BClientError
-
-    with patch(CATALOG_MODULE) as mock_b2b:
-        mock_b2b.get_product_by_id = AsyncMock(
-            side_effect=B2BClientError(status_code=503, message="Service Unavailable")
-        )
-
+    with patch("src.routes.catalog.b2b_client.get_product_by_id", _b2b_error_mock()):
         resp = client.get("/api/v1/catalog/products/some_id")
 
     assert resp.status_code == 502
     data = resp.json()
-    assert data["detail"]["error"] == "B2B_UNAVAILABLE"
+    assert data["code"] == "B2B_UNAVAILABLE"
 
 
 def test_b2b_unavailable_returns_502_categories(client: TestClient):
     """When B2B is unavailable, GET /categories returns 502."""
-
-    from src.services.b2b_client import B2BClientError
-
-    with patch(CATALOG_MODULE) as mock_b2b:
-        mock_b2b.get_categories = AsyncMock(
-            side_effect=B2BClientError(status_code=503, message="Service Unavailable")
-        )
-
+    with patch("src.routes.catalog.b2b_client.get_categories", _b2b_error_mock()):
         resp = client.get("/api/v1/catalog/categories")
 
     assert resp.status_code == 502
+    data = resp.json()
+    assert data["code"] == "B2B_UNAVAILABLE"
 
 
 # ======================================================================
 # TEST 5 — product not found (404)
 # ======================================================================
 
-# ======================================================================
-# TEST 5 — product not found (blocked/deleted) returns 404
-# ======================================================================
-
 def test_product_not_found_returns_404(client: TestClient):
     """Non-existent or blocked product returns 404."""
-
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_product_by_id = AsyncMock(return_value=None)
 
         resp = client.get("/api/v1/catalog/products/nonexistent")
 
     assert resp.status_code == 404
     data = resp.json()
-    assert data["detail"]["error"] == "PRODUCT_NOT_FOUND"
+    assert data["code"] == "PRODUCT_NOT_FOUND"
+
+
+def test_blocked_product_returns_404(client: TestClient):
+    """Blocked / deleted product returns 404."""
+    with patch(CATALOG_B2B) as mock_b2b:
+        # B2B returns None for blocked products
+        mock_b2b.get_product_by_id = AsyncMock(return_value=None)
+
+        resp = client.get("/api/v1/catalog/products/blocked-product")
+
+    assert resp.status_code == 404
+    data = resp.json()
+    assert data["code"] == "PRODUCT_NOT_FOUND"
 
 
 # ======================================================================
@@ -495,8 +509,7 @@ def test_product_not_found_returns_404(client: TestClient):
 # ======================================================================
 
 def test_product_card_returns_full_data_with_skus(client: TestClient):
-    """Happy path: product card returns full data with SKUs (photos, description, prices)."""
-
+    """Happy path: product card returns full data with SKUs."""
     product = {
         "product_id": "p1",
         "title": "Wireless Headphones",
@@ -528,7 +541,7 @@ def test_product_card_returns_full_data_with_skus(client: TestClient):
         ],
     }
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_product_by_id = AsyncMock(return_value=product)
 
         resp = client.get("/api/v1/catalog/products/p1")
@@ -536,26 +549,24 @@ def test_product_card_returns_full_data_with_skus(client: TestClient):
     assert resp.status_code == 200
     data = resp.json()
 
-    # Product-level fields
-    assert data["product_id"] == "p1"
-    assert data["title"] == "Wireless Headphones"
+    assert data["id"] == "p1"
+    assert data["name"] == "Wireless Headphones"
     assert data["min_price"] == 4999.0
     assert len(data["images"]) == 3
     assert data["characteristics"]["color"] == "black"
     assert data["description"] == "High-quality wireless headphones with ANC."
 
-    # SKUs
     assert len(data["skus"]) == 2
 
-    sku1 = next(s for s in data["skus"] if s["sku_id"] == "s1-black")
+    sku1 = next(s for s in data["skus"] if s["id"] == "s1-black")
     assert sku1["color"] == "black"
     assert sku1["price"] == 4999.0
-    assert sku1["quantity_available"] == 10
+    assert sku1["available_quantity"] == 10
     assert sku1["is_active"] is True
     assert sku1["in_stock"] is True
     assert sku1["discount"] == 500.0
 
-    sku2 = next(s for s in data["skus"] if s["sku_id"] == "s2-white")
+    sku2 = next(s for s in data["skus"] if s["id"] == "s2-white")
     assert sku2["price"] == 5299.0
     assert sku2["discount"] == 0.0
 
@@ -565,12 +576,7 @@ def test_product_card_returns_full_data_with_skus(client: TestClient):
 # ======================================================================
 
 def test_cost_price_absent_in_response(client: TestClient):
-    """CRITICAL: cost_price must never appear in B2C SKU response.
-
-    This is a security boundary — cost_price is internal seller data.
-    Even if B2B returns it, it must be stripped from the B2C response.
-    """
-
+    """CRITICAL: cost_price must never appear in B2C SKU response."""
     product = {
         "product_id": "p1",
         "title": "Test Product",
@@ -587,7 +593,6 @@ def test_cost_price_absent_in_response(client: TestClient):
                 "price": 1000.0,
                 "quantity_available": 5,
                 "is_active": True,
-                # B2B may return internal fields — they MUST be stripped
                 "cost_price": 250.0,
                 "reserved_quantity": 2,
                 "internal_note": "secret",
@@ -596,26 +601,23 @@ def test_cost_price_absent_in_response(client: TestClient):
         ],
     }
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_product_by_id = AsyncMock(return_value=product)
 
         resp = client.get("/api/v1/catalog/products/p1")
 
     assert resp.status_code == 200
     data = resp.json()
-
     sku = data["skus"][0]
 
-    # Explicit security assertions — these fields MUST be absent
     assert "cost_price" not in sku, "cost_price LEAKED — security violation!"
     assert "reserved_quantity" not in sku, "reserved_quantity LEAKED — security violation!"
     assert "internal_note" not in sku, "internal_note LEAKED — security violation!"
     assert "margin" not in sku, "margin LEAKED — security violation!"
 
-    # Safe fields still present
-    assert sku["sku_id"] == "s1"
+    assert sku["id"] == "s1"
     assert sku["price"] == 1000.0
-    assert sku["quantity_available"] == 5
+    assert sku["available_quantity"] == 5
     assert sku["is_active"] is True
 
 
@@ -625,7 +627,6 @@ def test_cost_price_absent_in_response(client: TestClient):
 
 def test_sku_without_stock_is_shown_as_unavailable(client: TestClient):
     """SKU with quantity_available = 0 is returned but with in_stock = false."""
-
     product = {
         "product_id": "p1",
         "title": "Limited Product",
@@ -653,7 +654,7 @@ def test_sku_without_stock_is_shown_as_unavailable(client: TestClient):
         ],
     }
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_product_by_id = AsyncMock(return_value=product)
 
         resp = client.get("/api/v1/catalog/products/p1")
@@ -661,31 +662,29 @@ def test_sku_without_stock_is_shown_as_unavailable(client: TestClient):
     assert resp.status_code == 200
     data = resp.json()
 
-    # Both SKUs are in the list (not hidden)
     assert len(data["skus"]) == 2
 
-    sku_in = next(s for s in data["skus"] if s["sku_id"] == "s1-in-stock")
-    assert sku_in["quantity_available"] == 5
+    sku_in = next(s for s in data["skus"] if s["id"] == "s1-in-stock")
+    assert sku_in["available_quantity"] == 5
     assert sku_in["in_stock"] is True
 
-    sku_out = next(s for s in data["skus"] if s["sku_id"] == "s2-out-of-stock")
-    assert sku_out["quantity_available"] == 0
+    sku_out = next(s for s in data["skus"] if s["id"] == "s2-out-of-stock")
+    assert sku_out["available_quantity"] == 0
     assert sku_out["in_stock"] is False
 
 
 # ======================================================================
-# TEST 7 — categories endpoint
+# TEST 9 — categories endpoint
 # ======================================================================
 
 def test_get_categories(client: TestClient):
     """GET /categories returns category tree from B2B."""
-
     categories = [
         {"category_id": "cat1", "name": "Electronics", "parent_id": None},
         {"category_id": "cat2", "name": "Phones", "parent_id": "cat1"},
     ]
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_categories = AsyncMock(return_value=categories)
 
         resp = client.get("/api/v1/catalog/categories")
@@ -697,12 +696,11 @@ def test_get_categories(client: TestClient):
 
 
 # ======================================================================
-# TEST 8 — X-Service-Key header
+# TEST 10 — X-Service-Key header
 # ======================================================================
 
 def test_b2b_client_sends_x_service_key():
     """B2B client includes X-Service-Key header on requests."""
-
     from src.services.b2b_client import B2BClient
 
     client = B2BClient()
@@ -712,44 +710,19 @@ def test_b2b_client_sends_x_service_key():
 
 
 # ======================================================================
-# TEST 9 — default sort values
-# ======================================================================
-
-def test_default_sort_fields(client: TestClient):
-    """Default sort_by=popularity, sort_order=desc."""
-
-    products = [_make_product("p1", "X", 10.0)]
-    mock_result = _mock_b2b_products_result(products, total=1)
-
-    with patch(CATALOG_MODULE) as mock_b2b:
-        mock_b2b.get_products = AsyncMock(return_value=mock_result)
-
-        resp = client.get(
-            "/api/v1/catalog/products",
-            params={"page": 1, "page_size": 10},
-        )
-
-    assert resp.status_code == 200
-    call_kwargs = mock_b2b.get_products.call_args.kwargs
-    assert call_kwargs["sort_by"] == "popularity"
-    assert call_kwargs["sort_order"] == "desc"
-
-
-# ======================================================================
-# TEST 10 — facets with dict-style response from B2B
+# TEST 11 — facets with dict-style response from B2B
 # ======================================================================
 
 def test_facets_dict_response_from_b2b(client: TestClient):
     """Facets handle dict-style response from B2B (fallback format)."""
-
     facets_data = {
         "brand": {"apple": 45, "samsung": 67, "xiaomi": 34},
     }
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_facets = AsyncMock(return_value=_mock_b2b_facets_result(facets_data))
 
-        resp = client.get("/api/v1/catalog/facets", params={"category_id": "cat1"})
+        resp = client.get("/api/v1/catalog/facets", params={"filter[category_id]": "cat1"})
 
     assert resp.status_code == 200
     data = resp.json()
@@ -760,16 +733,15 @@ def test_facets_dict_response_from_b2b(client: TestClient):
 
 
 # ======================================================================
-# TEST 11 — facets empty
+# TEST 12 — facets empty
 # ======================================================================
 
 def test_facets_empty_result(client: TestClient):
     """Facets with empty B2B response returns empty facets list."""
-
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_facets = AsyncMock(return_value={"facets": {}})
 
-        resp = client.get("/api/v1/catalog/facets", params={"category_id": "cat1"})
+        resp = client.get("/api/v1/catalog/facets", params={"filter[category_id]": "cat1"})
 
     assert resp.status_code == 200
     data = resp.json()
@@ -778,31 +750,29 @@ def test_facets_empty_result(client: TestClient):
 
 
 # ======================================================================
-# TEST 12 — combined filters
+# TEST 13 — combined filters
 # ======================================================================
 
 def test_combined_filters(client: TestClient):
     """Multiple filters combined and passed to B2B correctly."""
-
     products = [_make_product("p1", "X", 150.0)]
     mock_result = _mock_b2b_products_result(products, total=1)
 
-    with patch(CATALOG_MODULE) as mock_b2b:
+    with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_products = AsyncMock(return_value=mock_result)
 
         resp = client.get(
             "/api/v1/catalog/products",
             params={
-                "category_id": "cat1",
-                "search": "phone",
-                "min_price": 100,
-                "max_price": 200,
-                "in_stock": True,
-                "brand": "apple",
-                "sort_by": "price",
-                "sort_order": "desc",
-                "page": 2,
-                "page_size": 50,
+                "filter[category_id]": "cat1",
+                "q": "phone",
+                "filter[price_min]": 100,
+                "filter[price_max]": 200,
+                "filter[in_stock]": "true",
+                "filter[brand]": "apple",
+                "sort": "price_desc",
+                "limit": 50,
+                "offset": 50,
             },
         )
 
@@ -816,5 +786,92 @@ def test_combined_filters(client: TestClient):
     assert call_kwargs["brand"] == "apple"
     assert call_kwargs["sort_by"] == "price"
     assert call_kwargs["sort_order"] == "desc"
+    # offset=50, limit=50 → page = 50//50 + 1 = 2
     assert call_kwargs["page"] == 2
     assert call_kwargs["page_size"] == 50
+
+
+# ======================================================================
+# US-CAT-02 — Text search for products
+# ======================================================================
+
+def test_search_returns_matching_products(client: TestClient):
+    """Happy path: search matches products by title and description."""
+    products = [
+        _make_product("p1", "Wireless Mouse", 25.0),
+        _make_product("p2", "Gaming Mouse Pro", 75.0),
+    ]
+
+    mock_result = _mock_b2b_products_result(products, total=2)
+
+    with patch(CATALOG_B2B) as mock_b2b:
+        mock_b2b.get_products = AsyncMock(return_value=mock_result)
+
+        resp = client.get(
+            "/api/v1/catalog/products",
+            params={"q": "mouse", "limit": 10, "offset": 0},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_count"] == 2
+    assert len(data["items"]) == 2
+
+    call_kwargs = mock_b2b.get_products.call_args.kwargs
+    assert call_kwargs["search"] == "mouse"
+
+
+def test_short_query_returns_400(client: TestClient):
+    """Query shorter than 3 characters → 400 SHORT_SEARCH_QUERY."""
+    resp = client.get(
+        "/api/v1/catalog/products",
+        params={"q": "ab", "limit": 10, "offset": 0},
+    )
+
+    assert resp.status_code == 400
+    data = resp.json()
+    assert data["code"] == "SHORT_SEARCH_QUERY"
+    assert "3" in data["message"]
+
+
+def test_special_chars_do_not_break_query(client: TestClient):
+    """Special characters (% _ ') are escaped and do not break the query."""
+    products = [_make_product("p1", "iPhone%15", 999.0)]
+    mock_result = _mock_b2b_products_result(products, total=1)
+
+    with patch(CATALOG_B2B) as mock_b2b:
+        mock_b2b.get_products = AsyncMock(return_value=mock_result)
+
+        # All three SQL metacharacters in one query
+        resp = client.get(
+            "/api/v1/catalog/products",
+            params={"q": "iPhone%15' and 1=1", "limit": 10, "offset": 0},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["items"]) == 1
+
+    call_kwargs = mock_b2b.get_products.call_args.kwargs
+    search_arg = call_kwargs["search"]
+    # Each special char must be backslash-escaped
+    assert "%" in search_arg or "\\%" in search_arg
+    assert "'" in search_arg or "\\'" in search_arg
+
+
+def test_empty_results_returns_200(client: TestClient):
+    """No matching products → 200 with an empty items list."""
+    mock_result = _mock_b2b_products_result([], total=0)
+
+    with patch(CATALOG_B2B) as mock_b2b:
+        mock_b2b.get_products = AsyncMock(return_value=mock_result)
+
+        resp = client.get(
+            "/api/v1/catalog/products",
+            params={"q": "zzzznonexistentzzzz", "limit": 10, "offset": 0},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_count"] == 0
+    assert len(data["items"]) == 0

@@ -49,25 +49,31 @@ class B2BClient:
                 message=f"B2B {method} {path} returned {response.status_code}: {response.text}",
             )
 
-    async def get_product_by_id(self, product_id: str) -> Optional[dict]:
-        """Get product details from B2B."""
+    async def get_product_by_id(self, product_id: str) -> dict:
+        """Get product details from B2B (public catalog endpoint).
+
+        Raises B2BClientError on failure (caller maps to 502).
+        Returns None if the product is not found (404).
+        """
         try:
-            return await self._request("GET", f"/products/{product_id}")
-        except B2BClientError:
-            return None
+            return await self._request("GET", f"/public/products/{product_id}")
+        except B2BClientError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
 
     async def get_skus_by_ids(self, sku_ids: list[str]) -> dict[str, dict]:
-        """Get multiple SKU details from B2B."""
+        """Get multiple SKU details from B2B (public batch endpoint)."""
         try:
-            resp = await self._request("POST", "/skus/batch", json_body={"sku_ids": sku_ids})
+            resp = await self._request("POST", "/public/skus/batch", json_body={"sku_ids": sku_ids})
             return resp if isinstance(resp, dict) else {}
         except B2BClientError:
             return {}
 
     async def get_sku_by_id(self, sku_id: str) -> Optional[dict]:
-        """Get single SKU details from B2B."""
+        """Get single SKU details from B2B (public endpoint)."""
         try:
-            return await self._request("GET", f"/skus/{sku_id}")
+            return await self._request("GET", f"/public/skus/{sku_id}")
         except B2BClientError:
             return None
 
@@ -114,7 +120,7 @@ class B2BClient:
             params["sort_order"] = sort_order
 
         try:
-            result = await self._request("GET", "/products", params=params)
+            result = await self._request("GET", "/public/products", params=params)
             return result
         except B2BClientError as exc:
             # Re-raise so the caller can map to 502/503
@@ -157,10 +163,69 @@ class B2BClient:
         except B2BClientError:
             return {}
 
-    async def reserve_stock(self, reservations: list[dict]) -> dict:
-        """Reserve stock in B2B for order creation."""
+    async def get_products_by_ids(self, product_ids: list[str]) -> dict[str, dict]:
+        """Get multiple products by string IDs (batch request).
+
+        Returns a dict mapping product_id -> product_data.
+        Returns empty dict on failure.
+        """
+        if not product_ids:
+            return {}
         try:
-            return await self._request("POST", "/reserve", json_body={"reservations": reservations})
+            resp = await self._request(
+                "POST", "/public/products/batch",
+                json_body={"product_ids": product_ids},
+            )
+            return resp if isinstance(resp, dict) else {}
+        except B2BClientError:
+            return {}
+
+    async def get_products_by_category(
+        self,
+        category_id: str,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict:
+        """Get products filtered by category."""
+        params: dict = {"category_id": category_id, "page": page, "page_size": page_size}
+        try:
+            return await self._request("GET", "/public/products", params=params)
+        except B2BClientError:
+            return {"products": [], "total": 0}
+
+    async def get_similar_products(
+        self,
+        product_id: str,
+        category_id: str,
+        limit: int = 8,
+    ) -> dict:
+        """Get similar products from B2B (proxy to B2B algorithm).
+
+        Returns products from the same category, excluding the current product.
+        """
+        params: dict = {
+            "product_id": product_id,
+            "category_id": category_id,
+            "limit": limit,
+        }
+        try:
+            return await self._request("GET", "/catalog/similar", params=params)
+        except B2BClientError as exc:
+            raise exc
+
+    async def reserve_stock(self, reservations: list[dict]) -> dict:
+        """Reserve stock in B2B for order creation.
+
+        B2B returns:
+        {
+          "success": [{"sku_id": int, "reserved": int, "remaining": int}, ...],
+          "failed": [{"sku_id": int, "reason": str, ...}, ...],
+          "total_reserved": int,
+          "total_failed": int
+        }
+        """
+        try:
+            return await self._request("POST", "/inventory/reserve", json_body={"reservations": reservations})
         except B2BClientError as exc:
             raise exc
 
