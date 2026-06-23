@@ -139,6 +139,11 @@ class OrderList(BaseModel):
     page_size: int
 
 
+class OrderStatusUpdate(BaseModel):
+    """Internal status update (logistics / admin)."""
+    status: OrderStatus
+
+
 # --- Wishlist schemas ---
 class WishlistItemCreate(BaseModel):
     """Add to wishlist request."""

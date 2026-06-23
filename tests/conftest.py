@@ -52,7 +52,17 @@ def client(db_session: AsyncSession) -> Generator[TestClient, None, None]:
 
     app.dependency_overrides[get_db] = override_get_db
 
+    import src.database as database_module
+    import src.services.order_fulfill as order_fulfill_module
+
+    original_session_maker = database_module.async_session_maker
+    original_fulfill_session_maker = order_fulfill_module.async_session_maker
+    database_module.async_session_maker = AsyncSessionLocal
+    order_fulfill_module.async_session_maker = AsyncSessionLocal
+
     with TestClient(app=app, raise_server_exceptions=False) as client:
         yield client
 
+    database_module.async_session_maker = original_session_maker
+    order_fulfill_module.async_session_maker = original_fulfill_session_maker
     app.dependency_overrides.clear()

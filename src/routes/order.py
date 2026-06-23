@@ -1,6 +1,6 @@
 """Order routes — checkout with idempotency, B2B enrichment, all-or-nothing reserve."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status, Header
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -14,8 +14,11 @@ from src.schemas import (
     Order,
     OrderItem,
     OrderStatus,
+    OrderStatusUpdate,
 )
 from src.services.b2b_client import b2b_client, B2BClientError
+from src.services.order_fulfill import on_order_delivered, fulfill_order_stock, retry_fulfill_order
+from src.routes.internal_auth import verify_internal_service
 
 router = APIRouter()
 
@@ -292,6 +295,116 @@ async def get_order(
     items = items_result.scalars().all()
 
     return _order_to_schema(order, items)
+
+
+# =====================================================================
+# PATCH /api/v1/orders/{order_id}/status — internal status update (B2C-13)
+# =====================================================================
+
+_DELIVERED_FROM = {OrderStatus.ASSEMBLING, OrderStatus.DELIVERING}
+
+
+@router.patch("/{order_id}/status", response_model=Order)
+async def update_order_status(
+    order_id: int,
+    body: OrderStatusUpdate,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_internal_service),
+):
+    """Update order status (logistics). Transition to DELIVERED triggers B2B fulfill."""
+    result = await db.execute(
+        select(OrderModel).where(OrderModel.order_id == order_id)
+    )
+    order = result.scalar_one_or_none()
+
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "ORDER_NOT_FOUND", "message": "Order not found"},
+        )
+
+    new_status = body.status
+    if new_status == order.status:
+        items_result = await db.execute(
+            select(OrderItemModel).where(OrderItemModel.order_id == order_id)
+        )
+        items = items_result.scalars().all()
+        return _order_to_schema(order, items)
+
+    if new_status == OrderStatus.DELIVERED and order.status not in _DELIVERED_FROM:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "INVALID_STATUS_TRANSITION",
+                "message": f"Cannot transition from {order.status} to DELIVERED",
+                "current_status": order.status.value,
+            },
+        )
+
+    previous_status = order.status
+    order.status = new_status
+
+    items_result = await db.execute(
+        select(OrderItemModel).where(OrderItemModel.order_id == order_id)
+    )
+    order_items = items_result.scalars().all()
+
+    if new_status == OrderStatus.DELIVERED and previous_status != OrderStatus.DELIVERED:
+        await on_order_delivered(
+            order,
+            order_items,
+            db,
+            schedule_retry=lambda oid: background_tasks.add_task(retry_fulfill_order, oid),
+        )
+
+    await db.commit()
+    await db.refresh(order)
+
+    return _order_to_schema(order, order_items)
+
+
+# =====================================================================
+# POST /api/v1/orders/{order_id}/fulfill-retry — retry failed fulfill
+# =====================================================================
+
+@router.post("/{order_id}/fulfill-retry", response_model=Order)
+async def fulfill_order_retry(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_internal_service),
+):
+    """Retry B2B fulfill for a DELIVERED order where fulfill did not complete."""
+    result = await db.execute(
+        select(OrderModel).where(OrderModel.order_id == order_id)
+    )
+    order = result.scalar_one_or_none()
+
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "ORDER_NOT_FOUND", "message": "Order not found"},
+        )
+
+    if order.status != OrderStatus.DELIVERED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "NOT_DELIVERED",
+                "message": f"Order is in {order.status} status, not DELIVERED",
+            },
+        )
+
+    items_result = await db.execute(
+        select(OrderItemModel).where(OrderItemModel.order_id == order_id)
+    )
+    order_items = items_result.scalars().all()
+
+    await fulfill_order_stock(order, order_items, db)
+    await db.commit()
+    await db.refresh(order)
+
+    return _order_to_schema(order, order_items)
 
 
 # =====================================================================

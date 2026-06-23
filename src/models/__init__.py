@@ -43,6 +43,7 @@ class OrderModel(Base):
     user_id = Column(String(64), nullable=False, index=True)
     idempotency_key = Column(String(128), unique=True, nullable=True, index=True)
     status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.CREATED)
+    fulfill_completed = Column(Boolean, nullable=False, default=False, server_default="false")
     total_amount = Column(Float, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

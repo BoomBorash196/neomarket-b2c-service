@@ -213,6 +213,22 @@ class B2BClient:
         except B2BClientError as exc:
             raise exc
 
+    async def fulfill_stock(self, order_id: int, reservations: list[dict]) -> dict:
+        """Finalize stock reservation — deduct reserved quantity on delivery.
+
+        Called when order is DELIVERED. B2B must handle idempotently:
+        repeated calls with the same order_id → 200 without changes.
+
+        reservations format: [{"sku_id": str, "quantity": int, "order_id": int}, ...]
+        """
+        try:
+            return await self._request("POST", "/inventory/fulfill", json_body={
+                "order_id": order_id,
+                "reservations": reservations,
+            })
+        except B2BClientError as exc:
+            raise exc
+
     async def reserve_stock(self, reservations: list[dict]) -> dict:
         """Reserve stock in B2B for order creation.
 
