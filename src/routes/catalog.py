@@ -275,7 +275,7 @@ async def get_products(
 # GET /api/v1/catalog/products/{product_id}
 # ---------------------------------------------------------------------------
 @router.get("/products/{product_id}", response_model=ProductDetail)
-async def get_product(product_id: str, db: AsyncSession = Depends(get_db)):
+async def get_product(product_id: str):
     """Get full product details."""
     try:
         product_data = await b2b_client.get_product_by_id(product_id)

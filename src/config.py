@@ -19,5 +19,9 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:8080"]
 
+    # JWT
+    JWT_SECRET_KEY: str = "test-secret-key-for-jwt"
+    JWT_ALGORITHM: str = "HS256"
+
 
 settings = Settings()

@@ -1,19 +1,17 @@
 """Add fulfill_completed flag to orders.
 
 Revision ID: 007_add_fulfill_completed
-Revises: 004_add_subscriptions_table
+Revises: 006_add_unavailable_reason_and_event_idempotency
 Create Date: 2026-06-23
 
 Tracks whether B2B fulfill succeeded for a DELIVERED order.
-Order status stays DELIVERED on fulfill failure; retry uses this flag.
 """
 
 from alembic import op
 import sqlalchemy as sa
 
-
 revision = "007_add_fulfill_completed"
-down_revision = "004_add_subscriptions_table"
+down_revision = "006_add_unavailable_reason_and_event_idempotency"
 branch_labels = None
 depends_on = None
 

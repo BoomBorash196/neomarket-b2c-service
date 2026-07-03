@@ -700,11 +700,11 @@ def test_get_categories(client: TestClient):
 # ======================================================================
 
 def test_b2b_client_sends_x_service_key():
-    """B2B client includes X-Service-Key header on requests."""
+    """B2B client includes X-Service-Key header on internal requests."""
     from src.services.b2b_client import B2BClient
 
     client = B2BClient()
-    headers = client._headers()
+    headers = client._internal_headers()
     assert "X-Service-Key" in headers
     assert headers["X-Service-Key"] == "neomarket-b2c-secret-key"
 

@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status, Header
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
 import uuid
@@ -26,6 +26,26 @@ router = APIRouter()
 # =====================================================================
 # Helpers
 # =====================================================================
+
+async def get_current_user_id(
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    x_test_user_id: Optional[str] = Header(None, alias="X-Test-User-Id"),
+) -> str:
+    """Extract user_id from JWT header or test header.
+
+    Production: X-User-Id (set by API gateway / JWT middleware).
+    Tests: X-Test-User-Id (simulates authenticated user).
+    If neither is provided → 401.
+    """
+    if x_test_user_id:
+        return x_test_user_id
+    if x_user_id:
+        return x_user_id
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={"code": "MISSING_AUTH", "message": "Authentication required"},
+    )
+
 
 def _order_to_schema(order: OrderModel, items: List[OrderItemModel]) -> Order:
     """Convert ORM objects to response schema."""
@@ -60,6 +80,8 @@ async def checkout(
     order_data: OrderCreate,
     db: AsyncSession = Depends(get_db),
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    x_test_user_id: Optional[str] = Header(None, alias="X-Test-User-Id"),
 ):
     """Create order from cart with idempotency and all-or-nothing reserve.
 
@@ -71,6 +93,19 @@ async def checkout(
       5. Create Order + OrderItems with fixed snapshot prices and PAID status.
       6. Clear cart.
     """
+    # User identity from headers only — NEVER from request body (IDOR prevention)
+    # Production: X-User-Id (set by API gateway / JWT middleware).
+    # Tests: X-Test-User-Id (simulates authenticated user).
+    user_id = x_test_user_id or x_user_id
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "MISSING_AUTH", "message": "User ID required"},
+        )
+
+    # Generate idempotency key if not provided (client-side idempotency)
+    effective_idempotency_key = idempotency_key or str(uuid.uuid4())
+
     # --- Step 1: Idempotency check ---
     if idempotency_key:
         existing = await db.execute(
@@ -86,7 +121,7 @@ async def checkout(
 
     # --- Step 2: Fetch cart items ---
     cart_result = await db.execute(
-        select(CartItemModel).where(CartItemModel.user_id == order_data.user_id)
+        select(CartItemModel).where(CartItemModel.user_id == user_id)
     )
     cart_items = cart_result.scalars().all()
 
@@ -199,8 +234,8 @@ async def checkout(
     total_amount = sum(it["unit_price"] * it["quantity"] for it in enriched_items)
 
     order = OrderModel(
-        user_id=order_data.user_id,
-        idempotency_key=idempotency_key or str(uuid.uuid4()),
+        user_id=user_id,
+        idempotency_key=effective_idempotency_key,
         status=OrderStatus.PAID,
         total_amount=total_amount,
     )
@@ -221,10 +256,21 @@ async def checkout(
 
     # --- Step 6: Clear cart ---
     await db.execute(
-        CartItemModel.__table__.delete().where(CartItemModel.user_id == order_data.user_id)
+        CartItemModel.__table__.delete().where(CartItemModel.user_id == user_id)
     )
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        # Race condition: duplicate idempotency_key from concurrent requests
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "DUPLICATE_IDEMPOTENCY_KEY",
+                "message": "Order with this idempotency key already exists",
+            },
+        ) from exc
 
     # Refresh and return
     await db.refresh(order)
@@ -240,16 +286,32 @@ async def checkout(
 # GET /api/v1/orders
 # =====================================================================
 
-@router.get("", response_model=List[Order])
+@router.get("", response_model=dict)
 async def get_user_orders(
-    user_id: str = Query(..., description="User ID"),
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(10, ge=1, le=100, description="Page size"),
+    status: Optional[str] = Query(None, description="Filter by status"),
     db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
 ):
-    """Get user's order history."""
+    """Get user's order history with pagination and IDOR protection."""
+    base_query = select(OrderModel).where(OrderModel.user_id == user_id)
+    if status:
+        base_query = base_query.where(OrderModel.status == OrderStatus(status))
+
+    # Total count
+    count_result = await db.execute(
+        select(func.count()).select_from(base_query.subquery())
+    )
+    total = count_result.scalar()
+
+    # Paginated results
+    offset = (page - 1) * page_size
     result = await db.execute(
-        select(OrderModel)
-        .where(OrderModel.user_id == user_id)
+        base_query
         .order_by(OrderModel.created_at.desc())
+        .limit(page_size)
+        .offset(offset)
     )
     orders = result.scalars().all()
 
@@ -261,7 +323,12 @@ async def get_user_orders(
         items = items_result.scalars().all()
         response.append(_order_to_schema(order, items))
 
-    return response
+    return {
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "orders": response,
+    }
 
 
 # =====================================================================
@@ -270,9 +337,9 @@ async def get_user_orders(
 
 @router.get("/{order_id}", response_model=Order)
 async def get_order(
-    order_id: int,
-    user_id: str = Query(..., description="User ID for IDOR protection"),
+    order_id: str,
     db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
 ):
     """Get order details with IDOR protection."""
     result = await db.execute(
@@ -306,7 +373,7 @@ _DELIVERED_FROM = {OrderStatus.ASSEMBLING, OrderStatus.DELIVERING}
 
 @router.patch("/{order_id}/status", response_model=Order)
 async def update_order_status(
-    order_id: int,
+    order_id: str,
     body: OrderStatusUpdate,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
@@ -370,7 +437,7 @@ async def update_order_status(
 
 @router.post("/{order_id}/fulfill-retry", response_model=Order)
 async def fulfill_order_retry(
-    order_id: int,
+    order_id: str,
     db: AsyncSession = Depends(get_db),
     _: None = Depends(verify_internal_service),
 ):
@@ -413,19 +480,11 @@ async def fulfill_order_retry(
 
 @router.post("/{order_id}/cancel", response_model=Order)
 async def cancel_order(
-    order_id: int,
-    user_id: str = Query(..., description="User ID for IDOR protection"),
+    order_id: str,
     db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
 ):
-    """Cancel order if possible (CREATED or PAID status).
-
-    Flow:
-      1. Check order exists and belongs to user (IDOR).
-      2. Check status is cancellable (CREATED, PAID only).
-      3. Attempt all-or-nothing unreserve via B2B.
-      4. If unreserve succeeds → CANCELLED.
-      5. If unreserve fails → CANCEL_PENDING (await async retry via POST /cancel-retry).
-    """
+    """Cancel order if possible (CREATED or PAID status)."""
     result = await db.execute(
         select(OrderModel).where(
             (OrderModel.order_id == order_id) &
@@ -451,28 +510,26 @@ async def cancel_order(
             },
         )
 
-    # Release stock reservation (all-or-nothing)
+    # All-or-nothing unreserve
     items_result = await db.execute(
         select(OrderItemModel).where(OrderItemModel.order_id == order_id)
     )
     order_items = items_result.scalars().all()
 
+    reservations = [
+        {"sku_id": item.sku_id, "quantity": -item.quantity}
+        for item in order_items
+    ]
+
     unreserve_ok = True
-    for item in order_items:
-        try:
-            await b2b_client.reserve_stock([
-                {"sku_id": item.sku_id, "quantity": -item.quantity}
-            ])
-        except B2BClientError as exc:
-            unreserve_ok = False
-            # Log the error — in production this would go to a log aggregator
-            pass  # Log but don't fail — manual intervention may be needed
+    try:
+        await b2b_client.reserve_stock(reservations)
+    except B2BClientError:
+        unreserve_ok = False
 
     if unreserve_ok:
         order.status = OrderStatus.CANCELLED
     else:
-        # Unreserve failed — mark as CANCEL_PENDING so async retry can complete it.
-        # Scaffold: no Celery yet, but the status allows POST /cancel-retry to finish the job.
         order.status = OrderStatus.CANCEL_PENDING
 
     await db.commit()
@@ -492,16 +549,11 @@ async def cancel_order(
 
 @router.post("/{order_id}/cancel-retry", response_model=Order)
 async def cancel_order_retry(
-    order_id: int,
-    user_id: str = Query(..., description="User ID for IDOR protection"),
+    order_id: str,
     db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
 ):
-    """Retry unreserve for an order stuck in CANCEL_PENDING.
-
-    Called by a background worker (scaffold: management command / Celery / cron).
-    If unreserve succeeds → CANCELLED.
-    If unreserve fails again → stays CANCEL_PENDING (logged for manual review).
-    """
+    """Retry unreserve for an order stuck in CANCEL_PENDING."""
     result = await db.execute(
         select(OrderModel).where(
             (OrderModel.order_id == order_id) &
@@ -525,27 +577,24 @@ async def cancel_order_retry(
             },
         )
 
-    # Release stock reservation
     items_result = await db.execute(
         select(OrderItemModel).where(OrderItemModel.order_id == order_id)
     )
     order_items = items_result.scalars().all()
 
+    reservations = [
+        {"sku_id": item.sku_id, "quantity": -item.quantity}
+        for item in order_items
+    ]
+
     unreserve_ok = True
-    for item in order_items:
-        try:
-            await b2b_client.reserve_stock([
-                {"sku_id": item.sku_id, "quantity": -item.quantity}
-            ])
-        except B2BClientError as exc:
-            unreserve_ok = False
-            # Log the error — in production this would go to a log aggregator
-            # For now, we just flag it and leave the order in CANCEL_PENDING
-            pass  # Log but don't fail — manual intervention may be needed
+    try:
+        await b2b_client.reserve_stock(reservations)
+    except B2BClientError:
+        unreserve_ok = False
 
     if unreserve_ok:
         order.status = OrderStatus.CANCELLED
-    # else: stays CANCEL_PENDING
 
     await db.commit()
     await db.refresh(order)

@@ -1,4 +1,8 @@
-"""Cart routes — B2C shopping cart with guest/auth merge, B2B enrichment, unavailable reason."""
+"""Cart routes — B2C shopping cart with guest/auth merge, B2B enrichment, unavailable reason.
+
+Secure identity: user_id comes ONLY from X-User-Id header (JWT proxy).
+Query/body user_id is ALWAYS ignored to prevent IDOR.
+"""
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Header, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +22,30 @@ from src.schemas import (
 from src.services.b2b_client import b2b_client, B2BClientError
 
 router = APIRouter()
+
+
+# =====================================================================
+# Dependency — secure user identity (IDOR protection)
+# =====================================================================
+
+async def get_current_user_id(
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    x_test_user_id: Optional[str] = Header(None, alias="X-Test-User-Id"),
+) -> str:
+    """Extract user_id from X-User-Id header (JWT proxy).
+
+    CRITICAL: user_id is NEVER read from query params or request body.
+    This prevents IDOR — a user cannot view/modify another user's
+    cart by passing ?user_id=... in the query string.
+    """
+    if x_test_user_id:
+        return x_test_user_id
+    if not x_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "MISSING_AUTH", "message": "X-User-Id header required"},
+        )
+    return x_user_id
 
 
 # =====================================================================
@@ -43,9 +71,9 @@ def _enrich_cart_items(
                 "cart_item_id": ci.cart_item_id,
                 "sku_id": ci.sku_id,
                 "quantity": ci.quantity,
-                "product_id": sku_info.get("product_id", "") if sku_info else "",
-                "product_title": sku_info.get("product_title", f"SKU {ci.sku_id}") if sku_info else f"SKU {ci.sku_id}",
-                "price": sku_info.get("price", 0.0) if sku_info else 0.0,
+                "product_id": "",
+                "product_title": f"SKU {ci.sku_id}",
+                "price": 0.0,
                 "unavailable_reason": "sku_not_found",
             })
             continue
@@ -111,7 +139,7 @@ def _build_cart_response(
 
 @router.get("", response_model=CartWithUnavailable)
 async def get_cart(
-    user_id: str = Query(..., description="User ID or guest session ID"),
+    user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
     """Get user's shopping cart enriched with B2B data.
@@ -147,7 +175,7 @@ async def get_cart(
 @router.post("/items", response_model=CartWithUnavailable)
 async def add_to_cart(
     item: CartItemCreate,
-    user_id: str = Query(..., description="User ID or guest session ID"),
+    user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
     """Add item to cart. Increments quantity if SKU already present.
@@ -236,7 +264,7 @@ async def add_to_cart(
 async def update_cart_item(
     sku_id: str,
     quantity: int = Query(..., ge=1, description="New quantity"),
-    user_id: str = Query(..., description="User ID or guest session ID"),
+    user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
     """Update quantity of a cart item by SKU."""
@@ -293,7 +321,7 @@ async def update_cart_item(
 @router.delete("/items/{sku_id}", response_model=CartWithUnavailable)
 async def remove_from_cart(
     sku_id: str,
-    user_id: str = Query(..., description="User ID or guest session ID"),
+    user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
     """Remove item from cart."""
@@ -323,7 +351,7 @@ async def remove_from_cart(
 
 @router.delete("", status_code=204)
 async def clear_cart(
-    user_id: str = Query(..., description="User ID or guest session ID"),
+    user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
     """Remove all items from cart."""

@@ -38,4 +38,4 @@ def test_get_recommendations_product_not_found(client: TestClient):
     data = response.json()
     assert data["current_product_id"] == "nonexistent"
     assert data["recommendations"] == []
-    assert data["reason"] == "Product not found"
+    assert data["reason"] == "product_not_found"

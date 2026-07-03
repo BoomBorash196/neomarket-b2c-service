@@ -47,7 +47,7 @@ async def test_subscribe_returns_201_with_notify_on(
     b2b_client.get_sku_by_id = AsyncMock(return_value=mock_data)
 
     response = client.post(
-        "/api/v1/cart/subscribe",
+        "/api/v1/subscriptions/subscribe",
         json={"sku_id": sku_id, "notify_on": "in_stock"},
         headers={"X-User-Id": user_id},
     )
@@ -88,7 +88,7 @@ async def test_duplicate_subscription_returns_409(
 
     # First subscription — should succeed
     response = client.post(
-        "/api/v1/cart/subscribe",
+        "/api/v1/subscriptions/subscribe",
         json={"sku_id": sku_id, "notify_on": "in_stock"},
         headers={"X-User-Id": user_id},
     )
@@ -96,7 +96,7 @@ async def test_duplicate_subscription_returns_409(
 
     # Second subscription to the same SKU — should fail with 409
     response = client.post(
-        "/api/v1/cart/subscribe",
+        "/api/v1/subscriptions/subscribe",
         json={"sku_id": sku_id, "notify_on": "in_stock"},
         headers={"X-User-Id": user_id},
     )
@@ -122,7 +122,7 @@ async def test_invalid_notify_on_returns_400(
 
     # Empty notify_on — Pydantic will reject it
     response = client.post(
-        "/api/v1/cart/subscribe",
+        "/api/v1/subscriptions/subscribe",
         json={"sku_id": sku_id, "notify_on": ""},
         headers={"X-User-Id": user_id},
     )
@@ -130,7 +130,7 @@ async def test_invalid_notify_on_returns_400(
 
     # Invalid notify_on value
     response = client.post(
-        "/api/v1/cart/subscribe",
+        "/api/v1/subscriptions/subscribe",
         json={"sku_id": sku_id, "notify_on": "invalid_event"},
         headers={"X-User-Id": user_id},
     )
@@ -152,7 +152,7 @@ async def test_subscribe_to_unknown_product_returns_404(
     b2b_client.get_sku_by_id = AsyncMock(return_value=None)
 
     response = client.post(
-        "/api/v1/cart/subscribe",
+        "/api/v1/subscriptions/subscribe",
         json={"sku_id": sku_id, "notify_on": "in_stock"},
         headers={"X-User-Id": user_id},
     )
@@ -188,7 +188,7 @@ async def test_unsubscribe_returns_204(
 
     # First subscribe
     client.post(
-        "/api/v1/cart/subscribe",
+        "/api/v1/subscriptions/subscribe",
         json={"sku_id": sku_id, "notify_on": "in_stock"},
         headers={"X-User-Id": user_id},
     )
@@ -204,7 +204,7 @@ async def test_unsubscribe_returns_204(
 
     # Now unsubscribe
     response = client.delete(
-        f"/api/v1/cart/subscribe/{sku_id}",
+        f"/api/v1/subscriptions/subscribe/{sku_id}",
         headers={"X-User-Id": user_id},
     )
     assert response.status_code == 204
@@ -233,7 +233,7 @@ async def test_unsubscribe_idempotent(
 
     # Never subscribed
     response = client.delete(
-        f"/api/v1/cart/subscribe/{sku_id}",
+        f"/api/v1/subscriptions/subscribe/{sku_id}",
         headers={"X-User-Id": user_id},
     )
     assert response.status_code == 204
@@ -257,7 +257,7 @@ async def test_subscription_idor_protection(
 
     # User A subscribes
     client.post(
-        "/api/v1/cart/subscribe",
+        "/api/v1/subscriptions/subscribe",
         json={"sku_id": sku_id, "notify_on": "in_stock"},
         headers={"X-User-Id": user_a},
     )
@@ -265,7 +265,7 @@ async def test_subscription_idor_protection(
     # User B tries to subscribe to the same SKU — should create a NEW subscription
     # (not interfere with A's)
     response = client.post(
-        "/api/v1/cart/subscribe",
+        "/api/v1/subscriptions/subscribe",
         json={"sku_id": sku_id, "notify_on": "in_stock"},
         headers={"X-User-Id": user_b},
     )
@@ -303,7 +303,7 @@ async def test_missing_x_user_id_returns_401(
     b2b_client.get_sku_by_id = AsyncMock(return_value=mock_data)
 
     response = client.post(
-        "/api/v1/cart/subscribe",
+        "/api/v1/subscriptions/subscribe",
         json={"sku_id": sku_id, "notify_on": "in_stock"},
     )
     assert response.status_code == 401

@@ -14,7 +14,7 @@ from src.services.b2b_client import b2b_client, B2BClientError
 logger = logging.getLogger(__name__)
 
 
-def build_fulfill_reservations(order_items: List[OrderItemModel], order_id: int) -> list[dict]:
+def build_fulfill_reservations(order_items: List[OrderItemModel], order_id: str) -> list[dict]:
     """Build B2B fulfill payload from order line items."""
     return [
         {"sku_id": item.sku_id, "quantity": item.quantity, "order_id": order_id}
@@ -51,7 +51,7 @@ async def fulfill_order_stock(
     return True
 
 
-async def retry_fulfill_order(order_id: int) -> bool:
+async def retry_fulfill_order(order_id: str) -> bool:
     """Background retry: load order and attempt fulfill again."""
     async with async_session_maker() as db:
         result = await db.execute(
@@ -80,7 +80,7 @@ async def on_order_delivered(
     order: OrderModel,
     order_items: List[OrderItemModel],
     db: AsyncSession,
-    schedule_retry: Optional[Callable[[int], None]] = None,
+    schedule_retry: Optional[Callable[[str], None]] = None,
 ) -> None:
     """Trigger fulfill when order transitions to DELIVERED (B2C-13)."""
     success = await fulfill_order_stock(order, order_items, db)
