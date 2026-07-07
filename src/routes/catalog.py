@@ -69,12 +69,13 @@ ALLOWED_SORT_VALUES: list[str] = [
     "new",
 ]
 
-# Mapping from sort enum to B2B sort_by + sort_order
-SORT_MAP: dict[str, tuple[str, str]] = {
-    "price_asc": ("price", "asc"),
-    "price_desc": ("price", "desc"),
-    "popularity": ("popularity", "desc"),
-    "new": ("created_at", "desc"),
+# Mapping from sort enum to B2B sort value
+# B2B expects a single `sort` parameter with these values
+SORT_MAP: dict[str, str] = {
+    "price_asc": "price_asc",
+    "price_desc": "price_desc",
+    "popularity": "popularity",
+    "new": "new",
 }
 
 
@@ -91,14 +92,19 @@ async def _get_facets_from_b2b(
     search: Optional[str] = None,
 ) -> dict:
     """Common helper: call B2B facets and raise 502 on error."""
+    filters: dict = {}
+    if brand:
+        filters["brand"] = brand
+    if in_stock is not None:
+        filters["in_stock"] = in_stock
+
     try:
         result = await b2b_client.get_facets(
             category_id=category_id,
             search=search,
             min_price=price_min,
             max_price=price_max,
-            in_stock=in_stock,
-            facet_fields=["brand", "price_range", "rating", "in_stock"],
+            filters=filters if filters else None,
         )
         return result
     except B2BClientError as exc:
@@ -124,13 +130,20 @@ def _normalise_facets(raw_facets: dict) -> List[FacetBucket]:
         facets.append(FacetBucket(name=field_name, label=field_name.replace("_", " ").title(), values=facet_values))
     return facets
 def _map_b2b_product(raw: dict) -> dict:
-    """Normalise a B2B product dict into ProductDetail shape."""
+    """Normalise a B2B product dict into ProductDetail shape.
+
+    B2B returns: id, title, main_image_url, min_price, active_quantity,
+    stock_quantity, description, images [{id, url, ordering}],
+    characteristics, skus[].
+    """
     return {
-        "id": str(raw.get("product_id", "")),
+        "id": str(raw.get("id", "")),
         "name": raw.get("title", ""),
+        "title": raw.get("title", ""),
         "main_image_url": raw.get("main_image_url", ""),
         "min_price": float(raw.get("min_price", 0.0)),
-        "has_stock": bool(raw.get("is_available", True)),
+        "has_stock": bool(raw.get("active_quantity", 0) > 0),
+        "active_quantity": int(raw.get("active_quantity", 0)),
         "description": raw.get("description", ""),
         "images": raw.get("images", []),
         "characteristics": raw.get("characteristics", {}),
@@ -144,13 +157,13 @@ def _map_b2b_skus(raw_skus: list[dict]) -> list[dict]:
     CRITICAL: cost_price, reserved_quantity and any other internal seller
     fields MUST NOT appear in the response.  This is a security boundary.
 
-    Also renames B2B fields to B2C OpenAPI names:
-      sku_id → id, quantity_available → available_quantity
+    B2B SKU fields: sku_id, price, stock_quantity, active_quantity, is_active,
+    color, size, other_specs, discount, cost_price, reserved_quantity.
+    We rename to B2C names: stock_quantity → available_quantity.
     """
     excluded_keys = {"cost_price", "reserved_quantity"}
     skus = []
     for raw in raw_skus:
-        # Strip excluded first
         filtered = {k: v for k, v in raw.items() if k not in excluded_keys}
         sku = {
             "id": filtered.pop("sku_id", ""),
@@ -158,8 +171,8 @@ def _map_b2b_skus(raw_skus: list[dict]) -> list[dict]:
             "size": filtered.pop("size", None),
             "other_specs": filtered.pop("other_specs", None),
             "price": filtered.pop("price", 0.0),
-            "available_quantity": filtered.pop("quantity_available", 0),
-            "is_active": filtered.pop("is_active", True),
+            "available_quantity": filtered.pop("stock_quantity", 0),
+            "is_active": filtered.pop("active_quantity", 0) > 0,
             "discount": filtered.pop("discount", 0.0),
         }
         sku["in_stock"] = bool(sku["available_quantity"] > 0)
@@ -213,9 +226,8 @@ async def get_products(
     # --- Validate and sanitise search query ---
     safe_search = _validate_search(q)
 
-    # --- Validate sort ---
-    sort_by = "popularity"
-    sort_order = "desc"
+    # --- Build B2B sort value ---
+    b2b_sort: Optional[str] = None
     if sort is not None:
         if sort not in ALLOWED_SORT_VALUES:
             raise HTTPException(
@@ -225,7 +237,14 @@ async def get_products(
                     "message": f"Invalid sort value '{sort}'. Allowed values: {ALLOWED_SORT_VALUES}",
                 },
             )
-        sort_by, sort_order = SORT_MAP[sort]
+        b2b_sort = SORT_MAP[sort]
+
+    # --- Build B2B filters dict ---
+    filters: dict = {}
+    if brand:
+        filters["brand"] = brand
+    if in_stock_bool is not None:
+        filters["in_stock"] = in_stock_bool
 
     # --- Call B2B ---
     try:
@@ -234,18 +253,16 @@ async def get_products(
             search=safe_search,
             min_price=price_min,
             max_price=price_max,
-            in_stock=in_stock_bool,
-            brand=brand,
-            sort_by=sort_by,
-            sort_order=sort_order,
-            page=offset // limit + 1 if limit > 0 else 1,
-            page_size=limit,
+            sort=b2b_sort,
+            limit=limit,
+            offset=offset,
+            filters=filters if filters else None,
         )
     except B2BClientError as exc:
         raise _b2b_error(502, exc.message)
 
     # --- Map response ---
-    products = [_map_b2b_product(p) for p in result.get("products", [])]
+    products = [_map_b2b_product(p) for p in result.get("items", [])]
 
     product_details = []
     for p in products:
@@ -256,6 +273,8 @@ async def get_products(
                 main_image_url=p["main_image_url"],
                 min_price=p["min_price"],
                 has_stock=p["has_stock"],
+                title=p["title"],
+                active_quantity=p["active_quantity"],
                 description=p["description"],
                 images=p["images"],
                 characteristics=p["characteristics"],
@@ -265,7 +284,7 @@ async def get_products(
 
     return PaginatedCatalogProducts(
         items=product_details,
-        total_count=result.get("total", len(product_details)),
+        total_count=result.get("total_count", len(product_details)),
         limit=limit,
         offset=offset,
     )
@@ -295,6 +314,8 @@ async def get_product(product_id: str):
         main_image_url=product_data["main_image_url"],
         min_price=product_data["min_price"],
         has_stock=product_data["has_stock"],
+        title=product_data["title"],
+        active_quantity=product_data["active_quantity"],
         description=product_data["description"],
         images=product_data["images"],
         characteristics=product_data["characteristics"],
@@ -320,14 +341,20 @@ async def get_facets(
     if in_stock is not None:
         in_stock_bool = in_stock.lower() == "true"
 
+    # --- Build B2B filters dict ---
+    filters: dict = {}
+    if brand:
+        filters["brand"] = brand
+    if in_stock_bool is not None:
+        filters["in_stock"] = in_stock_bool
+
     try:
         result = await b2b_client.get_facets(
             category_id=category_id,
             search=q,
             min_price=price_min,
             max_price=price_max,
-            in_stock=in_stock_bool,
-            facet_fields=["brand", "price_range", "rating", "in_stock"],
+            filters=filters if filters else None,
         )
     except B2BClientError as exc:
         raise _b2b_error(502, exc.message)
@@ -407,8 +434,8 @@ async def get_similar_products(
         except B2BClientError as exc:
             raise _b2b_error(502, exc.message)
 
-        for raw in similar_result.get("products", []):
-            pid = raw.get("product_id", "")
+        for raw in similar_result.get("items", []):
+            pid = raw.get("id", "")
             if pid and pid != product_id and pid not in similar_ids:
                 similar_ids.add(pid)
                 recommendations.append(
@@ -417,7 +444,7 @@ async def get_similar_products(
                         name=raw.get("title", ""),
                         main_image_url=raw.get("main_image_url", ""),
                         min_price=float(raw.get("min_price", 0.0)),
-                        has_stock=bool(raw.get("is_available", True)),
+                        has_stock=bool(raw.get("active_quantity", 0) > 0),
                     )
                 )
                 if len(recommendations) >= SIMILAR_LIMIT:
@@ -438,8 +465,8 @@ async def get_similar_products(
             # Non-fatal — log and continue with what we have
             pass
         else:
-            for raw in more_result.get("products", []):
-                pid = raw.get("product_id", "")
+            for raw in more_result.get("items", []):
+                pid = raw.get("id", "")
                 if pid and pid != product_id and pid not in similar_ids:
                     similar_ids.add(pid)
                     recommendations.append(
@@ -448,12 +475,12 @@ async def get_similar_products(
                             name=raw.get("title", ""),
                             main_image_url=raw.get("main_image_url", ""),
                             min_price=float(raw.get("min_price", 0.0)),
-                            has_stock=bool(raw.get("is_available", True)),
+                            has_stock=bool(raw.get("active_quantity", 0) > 0),
                         )
                     )
                     if len(recommendations) >= SIMILAR_LIMIT:
                         break
-            filled_from_parent = len(more_result.get("products", [])) > 0
+            filled_from_parent = len(more_result.get("items", [])) > 0
 
     # Determine reason
     if not recommendations:

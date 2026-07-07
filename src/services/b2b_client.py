@@ -54,10 +54,12 @@ class B2BClient:
     ) -> dict:
         """Execute an HTTP request to B2B and return parsed JSON, or raise B2BClientError."""
         client = await self._get_client()
+        # Encode deepObject-style params (e.g. filters[brand]) for B2B
+        encoded_params = self._encode_deep_object(params)
         response = await client.request(
             method,
             f"{self.base_url}{path}",
-            params=params,
+            params=encoded_params,
             json=json_body,
             headers=headers or {},
         )
@@ -67,6 +69,25 @@ class B2BClient:
             status_code=response.status_code,
             message=f"B2B {method} {path} returned {response.status_code}: {response.text}",
         )
+
+    @staticmethod
+    def _encode_deep_object(params: Optional[dict]) -> Optional[dict]:
+        """Flatten deepObject-style dicts into flat query params.
+
+        B2B API expects `filters[brand]=apple` not `filters={"brand": "apple"}`.
+        This converts {"filters": {"brand": "a", "in_stock": true}}
+        to {"filters[brand]": "a", "filters[in_stock]": true}.
+        """
+        if not params:
+            return params
+        result: dict = {}
+        for key, value in params.items():
+            if isinstance(value, dict):
+                for sub_key, sub_value in value.items():
+                    result[f"{key}[{sub_key}]"] = sub_value
+            else:
+                result[key] = value
+        return result
 
     # ------------------------------------------------------------------
     # Public endpoints (no service key)
@@ -101,15 +122,18 @@ class B2BClient:
         search: Optional[str] = None,
         min_price: Optional[float] = None,
         max_price: Optional[float] = None,
-        in_stock: Optional[bool] = None,
-        brand: Optional[str] = None,
-        sort_by: Optional[str] = None,
-        sort_order: Optional[str] = "asc",
-        page: int = 1,
-        page_size: int = 20,
+        sort: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+        filters: Optional[dict] = None,
     ) -> dict:
-        """Get products with filtering, sorting, and pagination."""
-        params: dict = {"page": page, "page_size": page_size}
+        """Get products with filtering, sorting, and pagination.
+
+        Parameters match B2B OpenAPI GET /api/v1/public/products:
+          limit, offset, sort, category_id, search, min_price, max_price,
+          filters[brand], filters[in_stock], etc.
+        """
+        params: dict = {"limit": limit, "offset": offset}
         if category_id:
             params["category_id"] = category_id
         if search:
@@ -118,14 +142,11 @@ class B2BClient:
             params["min_price"] = min_price
         if max_price is not None:
             params["max_price"] = max_price
-        if in_stock is not None:
-            params["in_stock"] = in_stock
-        if brand:
-            params["brand"] = brand
-        if sort_by:
-            params["sort_by"] = sort_by
-        if sort_order:
-            params["sort_order"] = sort_order
+        if sort:
+            params["sort"] = sort
+        if filters:
+            for k, v in filters.items():
+                params[f"filters[{k}]"] = v
 
         try:
             return await self._request("GET", "/public/products", params=params)
@@ -138,10 +159,13 @@ class B2BClient:
         search: Optional[str] = None,
         min_price: Optional[float] = None,
         max_price: Optional[float] = None,
-        in_stock: Optional[bool] = None,
-        facet_fields: Optional[list[str]] = None,
+        filters: Optional[dict] = None,
     ) -> dict:
-        """Get facet counts from B2B."""
+        """Get facet counts from B2B.
+
+        Parameters match B2B OpenAPI GET /api/v1/public/products
+        (facets are computed from the same filter context).
+        """
         params: dict = {}
         if category_id:
             params["category_id"] = category_id
@@ -151,13 +175,12 @@ class B2BClient:
             params["min_price"] = min_price
         if max_price is not None:
             params["max_price"] = max_price
-        if in_stock is not None:
-            params["in_stock"] = in_stock
-        if facet_fields:
-            params["facet_fields"] = facet_fields
+        if filters:
+            for k, v in filters.items():
+                params[f"filters[{k}]"] = v
 
         try:
-            return await self._request("GET", "/catalog/facets", params=params)
+            return await self._request("GET", "/public/products", params=params)
         except B2BClientError as exc:
             raise exc
 

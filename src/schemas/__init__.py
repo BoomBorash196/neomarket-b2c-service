@@ -18,6 +18,13 @@ class OrderStatus(str, Enum):
 
 
 # --- Product schemas (from B2B) ---
+class ImageItem(BaseModel):
+    """Single image in a product's images array."""
+    id: str
+    url: str
+    ordering: int
+
+
 class ProductBasic(BaseModel):
     """Basic product info from B2B."""
     id: str
@@ -29,8 +36,10 @@ class ProductBasic(BaseModel):
 
 class ProductDetail(ProductBasic):
     """Full product details."""
+    title: str
+    active_quantity: int
     description: str
-    images: List[str]
+    images: List[ImageItem]
     characteristics: dict[str, str]
     skus: List["SKUInfo"]
 
@@ -303,8 +312,10 @@ class ProductDetailSchema(BaseModel):
     main_image_url: str
     min_price: float
     has_stock: bool
+    title: str
+    active_quantity: int
     description: str
-    images: List[str]
+    images: List[ImageItem]
     characteristics: dict[str, str]
     skus: List["SKUInfo"]
 
