@@ -200,15 +200,15 @@ class B2BClient:
     async def get_products_by_category(
         self,
         category_id: str,
-        page: int = 1,
-        page_size: int = 20,
+        limit: int = 20,
+        offset: int = 0,
     ) -> dict:
-        """Get products filtered by category."""
-        params: dict = {"category_id": category_id, "page": page, "page_size": page_size}
+        """Get products filtered by category (public endpoint, limit/offset pagination)."""
+        params: dict = {"category_id": category_id, "limit": limit, "offset": offset}
         try:
             return await self._request("GET", "/public/products", params=params)
         except B2BClientError:
-            return {"products": [], "total": 0}
+            return {"items": [], "total_count": 0}
 
     async def get_similar_products(
         self,

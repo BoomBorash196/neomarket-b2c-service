@@ -346,7 +346,7 @@ def test_facets_with_in_stock_filter(client: TestClient):
 
     assert resp.status_code == 200
     call_kwargs = mock_b2b.get_facets.call_args.kwargs
-    assert call_kwargs["in_stock"] is True
+    assert call_kwargs["filters"]["in_stock"] is True
 
 
 # ======================================================================
@@ -534,7 +534,11 @@ def test_product_card_returns_full_data_with_skus(client: TestClient):
         "active_quantity": 10,
         "stock_quantity": 10,
         "description": "High-quality wireless headphones with ANC.",
-        "images": ["http://img1.jpg", "http://img2.jpg", "http://img3.jpg"],
+        "images": [
+            {"id": "img1", "url": "http://img1.jpg", "ordering": 0},
+            {"id": "img2", "url": "http://img2.jpg", "ordering": 1},
+            {"id": "img3", "url": "http://img3.jpg", "ordering": 2},
+        ],
         "characteristics": {"color": "black", "bluetooth": "5.0"},
         "skus": [
             {

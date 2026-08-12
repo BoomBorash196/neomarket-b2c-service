@@ -45,11 +45,11 @@ def create_app() -> FastAPI:
         if 'unique' in error_msg.lower() or 'duplicate' in error_msg.lower():
             return JSONResponse(
                 status_code=HTTP_409_CONFLICT,
-                content={"detail": "Resource already exists", "error": "DUPLICATE_ENTRY"}
+                content={"code": "DUPLICATE_ENTRY", "message": "Resource already exists"}
             )
         return JSONResponse(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"detail": "Database integrity error", "error": "DATABASE_INTEGRITY_ERROR"}
+            content={"code": "DATABASE_INTEGRITY_ERROR", "message": "Database integrity error"}
         )
 
     @app.exception_handler(HTTPException)

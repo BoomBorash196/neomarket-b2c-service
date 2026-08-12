@@ -13,11 +13,11 @@ def test_get_recommendations(client: TestClient):
         "parent_category_id": "cat_parent",
     })
     b2b_client.get_products_by_category = AsyncMock(return_value={
-        "products": [
-            {"product_id": "rec1", "title": "Rec 1", "main_image_url": "http://img", "min_price": 100.0, "is_available": True},
-            {"product_id": "rec2", "title": "Rec 2", "main_image_url": "http://img", "min_price": 200.0, "is_available": True},
+        "items": [
+            {"id": "rec1", "title": "Rec 1", "main_image_url": "http://img", "min_price": 100.0, "is_available": True},
+            {"id": "rec2", "title": "Rec 2", "main_image_url": "http://img", "min_price": 200.0, "is_available": True},
         ],
-        "total": 2,
+        "total_count": 2,
     })
 
     response = client.get("/api/v1/recommendations/products/test_product_1?limit=4")

@@ -40,13 +40,13 @@ async def get_recommendations(product_id: str, limit: int = 4):
         try:
             products = await b2b_client.get_products_by_category(
                 category_id=category_id,
-                page=1,
-                page_size=limit * 2
+                limit=limit * 2,
+                offset=0,
             )
         except B2BClientError:
-            products = {"products": []}
-        for p in products.get("products", []):
-            pid = p.get("product_id", "")
+            products = {"items": [], "total_count": 0}
+        for p in products.get("items", []):
+            pid = p.get("id", "") or p.get("product_id", "")
             if pid and pid != product_id and pid not in seen_ids and len(recommendations) < limit:
                 recommendations.append(ProductBasic(
                     id=pid,
@@ -63,13 +63,13 @@ async def get_recommendations(product_id: str, limit: int = 4):
         try:
             more_products = await b2b_client.get_products_by_category(
                 category_id=parent_category_id,
-                page=1,
-                page_size=(limit - len(recommendations)) * 2
+                limit=(limit - len(recommendations)) * 2,
+                offset=0,
             )
         except B2BClientError:
-            more_products = {"products": []}
-        for p in more_products.get("products", []):
-            pid = p.get("product_id", "")
+            more_products = {"items": [], "total_count": 0}
+        for p in more_products.get("items", []):
+            pid = p.get("id", "") or p.get("product_id", "")
             if pid and pid != product_id and pid not in seen_ids and len(recommendations) < limit:
                 recommendations.append(ProductBasic(
                     id=pid,

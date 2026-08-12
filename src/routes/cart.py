@@ -161,7 +161,7 @@ async def get_cart(
     except B2BClientError:
         raise HTTPException(
             status_code=502,
-            detail={"error": "B2B_UNAVAILABLE", "message": "Cannot enrich cart"},
+            detail={"code": "B2B_UNAVAILABLE", "message": "Cannot enrich cart"},
         )
 
     available, unavailable = _enrich_cart_items(cart_items, skus_data)
