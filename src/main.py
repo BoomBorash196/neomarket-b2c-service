@@ -9,7 +9,8 @@ from starlette.status import HTTP_409_CONFLICT, HTTP_500_INTERNAL_SERVER_ERROR
 
 from src.config import settings
 from src.database import engine, Base
-from src.routes import cart, order, wishlist, catalog, home, recommendations, subscriptions, banner_events
+from src.routes import cart, order, wishlist, catalog, home, recommendations, subscriptions
+from src.routes.banner_events import router as banner_events_router
 from src.services.b2b_client import b2b_client
 
 
@@ -81,8 +82,8 @@ def create_app() -> FastAPI:
     app.include_router(catalog.router, prefix="/api/v1/catalog", tags=["Catalog"])
     app.include_router(home.router, prefix="/api/v1/home", tags=["Home"])
     app.include_router(recommendations.router, prefix="/api/v1/recommendations", tags=["Recommendations"])
-    app.include_router(banner_events.router, prefix="/api/v1/banner-events", tags=["Banner Events"])
     app.include_router(subscriptions.router, prefix="/api/v1/subscriptions", tags=["Subscriptions"])
+    app.include_router(banner_events_router, prefix="/api/v1/banner-events", tags=["Banner Events"])
 
     @app.get("/health")
     async def health_check():
