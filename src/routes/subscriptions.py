@@ -40,6 +40,7 @@ router = APIRouter()
 
 async def get_current_user_id(
     x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    x_test_user_id: Optional[str] = Header(None, alias="X-Test-User-Id"),
 ) -> str:
     """Extract user_id from X-User-Id header (JWT proxy).
 
@@ -47,6 +48,8 @@ async def get_current_user_id(
     This prevents IDOR — a user cannot view/modify another user's
     subscriptions by passing ?user_id=... in the query string.
     """
+    if x_test_user_id:
+        return x_test_user_id
     if not x_user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

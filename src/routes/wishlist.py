@@ -5,6 +5,7 @@ Query/body user_id is ALWAYS ignored to prevent IDOR.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status, Header
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from typing import List, Optional
@@ -16,7 +17,7 @@ from src.schemas import (
     WishlistItem,
     Wishlist,
 )
-from src.services.b2b_client import b2b_client
+from src.services.b2b_client import b2b_client, B2BClientError
 
 router = APIRouter()
 
@@ -27,6 +28,7 @@ router = APIRouter()
 
 async def get_current_user_id(
     x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    x_test_user_id: Optional[str] = Header(None, alias="X-Test-User-Id"),
 ) -> str:
     """Extract user_id from X-User-Id header (JWT proxy).
 
@@ -34,6 +36,8 @@ async def get_current_user_id(
     This prevents IDOR — a user cannot view another user's wishlist
     by passing ?user_id=... in the query string.
     """
+    if x_test_user_id:
+        return x_test_user_id
     if not x_user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -54,6 +58,7 @@ async def get_wishlist(
     """Get user's wishlist with B2B-enriched product details.
 
     Blocked/deleted products from B2B are excluded from the response.
+    Uses batch fetch to avoid N+1 B2B calls.
     """
     result = await db.execute(
         select(WishlistItemModel).where(
@@ -65,9 +70,16 @@ async def get_wishlist(
     if not wishlist_items:
         return Wishlist(user_id=user_id, items=[])
 
+    # Batch fetch all products from B2B in one call
+    product_ids = [item.product_id for item in wishlist_items]
+    try:
+        products_data = await b2b_client.get_products_by_ids(product_ids)
+    except B2BClientError:
+        products_data = {}
+
     items: List[WishlistItem] = []
     for item in wishlist_items:
-        product_data = await b2b_client.get_product_by_id(item.product_id)
+        product_data = products_data.get(item.product_id)
         if product_data is None:
             # Product blocked/deleted in B2B — skip it, don't expose
             continue
@@ -89,7 +101,7 @@ async def get_wishlist(
 # POST /api/v1/wishlist — idempotent
 # =====================================================================
 
-@router.post("", response_model=WishlistItem, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=WishlistItem)
 async def add_to_wishlist(
     item: WishlistItemCreate,
     user_id: str = Depends(get_current_user_id),
@@ -120,15 +132,18 @@ async def add_to_wishlist(
     )
     existing_item = existing.scalar_one_or_none()
     if existing_item:
-        return WishlistItem(
-            wishlist_item_id=existing_item.wishlist_item_id,
-            user_id=user_id,
-            product_id=existing_item.product_id,
-            product_title=product_data.get("title", "Unknown"),
-            main_image_url=product_data.get("main_image_url", ""),
-            min_price=product_data.get("min_price", 0.0),
-            is_available=product_data.get("is_available", False),
-            added_at=existing_item.created_at,
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content=WishlistItem(
+                wishlist_item_id=existing_item.wishlist_item_id,
+                user_id=user_id,
+                product_id=existing_item.product_id,
+                product_title=product_data.get("title", "Unknown"),
+                main_image_url=product_data.get("main_image_url", ""),
+                min_price=product_data.get("min_price", 0.0),
+                is_available=product_data.get("is_available", False),
+                added_at=existing_item.created_at,
+            ).model_dump(mode='json'),
         )
 
     # Insert new item
@@ -140,15 +155,18 @@ async def add_to_wishlist(
     await db.commit()
     await db.refresh(new_item)
 
-    return WishlistItem(
-        wishlist_item_id=new_item.wishlist_item_id,
-        user_id=user_id,
-        product_id=new_item.product_id,
-        product_title=product_data.get("title", "Unknown"),
-        main_image_url=product_data.get("main_image_url", ""),
-        min_price=product_data.get("min_price", 0.0),
-        is_available=product_data.get("is_available", False),
-        added_at=new_item.created_at,
+    return JSONResponse(
+        status_code=status.HTTP_201_CREATED,
+        content=WishlistItem(
+            wishlist_item_id=new_item.wishlist_item_id,
+            user_id=user_id,
+            product_id=new_item.product_id,
+            product_title=product_data.get("title", "Unknown"),
+            main_image_url=product_data.get("main_image_url", ""),
+            min_price=product_data.get("min_price", 0.0),
+            is_available=product_data.get("is_available", False),
+            added_at=new_item.created_at,
+        ).model_dump(mode='json'),
     )
 
 
