@@ -68,11 +68,12 @@ async def test_checkout_creates_paid_order_with_fixed_prices(
     b2b_client.get_skus_by_ids = AsyncMock(return_value=skus_data)
     b2b_client.reserve_stock = AsyncMock(return_value=_mock_reserve_success())
 
-    payload = {
-        "user_id": user_id,
-    }
-
-    response = client.post("/api/v1/orders", json=payload, headers={"Idempotency-Key": idem_key})
+    # user_id now comes from JWT (X-Test-User-Id header), not body
+    response = client.post(
+        "/api/v1/orders",
+        json={},
+        headers={"Idempotency-Key": idem_key, "X-Test-User-Id": user_id},
+    )
     assert response.status_code == 200
     data = response.json()
 
@@ -132,9 +133,11 @@ async def test_partial_reserve_failure_returns_409(
     b2b_client.get_skus_by_ids = AsyncMock(return_value=skus_data)
     b2b_client.reserve_stock = AsyncMock(return_value=_mock_reserve_success(failed=failed))
 
-    payload = {"user_id": user_id}
-
-    response = client.post("/api/v1/orders", json=payload, headers={"Idempotency-Key": idem_key})
+    response = client.post(
+        "/api/v1/orders",
+        json={},
+        headers={"Idempotency-Key": idem_key, "X-Test-User-Id": user_id},
+    )
     assert response.status_code == 409
     data = response.json()
     assert data["code"] == "RESERVE_FAILED"
@@ -168,15 +171,21 @@ async def test_idempotency_returns_existing_order(
     b2b_client.get_skus_by_ids = AsyncMock(return_value=skus_data)
     b2b_client.reserve_stock = AsyncMock(return_value=_mock_reserve_success())
 
-    payload = {"user_id": user_id}
-
     # First call
-    r1 = client.post("/api/v1/orders", json=payload, headers={"Idempotency-Key": idem_key})
+    r1 = client.post(
+        "/api/v1/orders",
+        json={},
+        headers={"Idempotency-Key": idem_key, "X-Test-User-Id": user_id},
+    )
     assert r1.status_code == 200
     order_id_1 = r1.json()["order_id"]
 
     # Second call with same key — should return the same order (idempotent)
-    r2 = client.post("/api/v1/orders", json=payload, headers={"Idempotency-Key": idem_key})
+    r2 = client.post(
+        "/api/v1/orders",
+        json={},
+        headers={"Idempotency-Key": idem_key, "X-Test-User-Id": user_id},
+    )
     assert r2.status_code == 200
     order_id_2 = r2.json()["order_id"]
 
@@ -209,9 +218,11 @@ async def test_b2b_unavailable_returns_503(
         side_effect=B2BClientError(status_code=503, message="Service unavailable")
     )
 
-    payload = {"user_id": user_id}
-
-    response = client.post("/api/v1/orders", json=payload, headers={"Idempotency-Key": "idem-503"})
+    response = client.post(
+        "/api/v1/orders",
+        json={},
+        headers={"Idempotency-Key": "idem-503", "X-Test-User-Id": user_id},
+    )
     assert response.status_code == 503
     data = response.json()
     assert data["code"] == "B2B_UNAVAILABLE"
@@ -234,9 +245,11 @@ async def test_checkout_empty_cart_returns_400(
     """Empty cart → 400 with EMPTY_CART error."""
     user_id = "test_user_empty"
 
-    payload = {"user_id": user_id}
-
-    response = client.post("/api/v1/orders", json=payload, headers={"Idempotency-Key": "idem-empty"})
+    response = client.post(
+        "/api/v1/orders",
+        json={},
+        headers={"Idempotency-Key": "idem-empty", "X-Test-User-Id": user_id},
+    )
     assert response.status_code == 400
     data = response.json()
     assert data["code"] == "EMPTY_CART"
@@ -264,7 +277,11 @@ async def test_get_order_with_items(
     ))
     await db_session.commit()
 
-    response = client.get(f"/api/v1/orders/{order.order_id}?user_id={user_id}")
+    # user_id from JWT (X-Test-User-Id header), not query
+    response = client.get(
+        f"/api/v1/orders/{order.order_id}",
+        headers={"X-Test-User-Id": user_id},
+    )
     assert response.status_code == 200
     data = response.json()
     assert data["order_id"] == order.order_id

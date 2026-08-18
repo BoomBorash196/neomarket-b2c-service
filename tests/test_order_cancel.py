@@ -42,7 +42,8 @@ async def test_cancel_paid_order_transitions_to_cancelled(
     b2b_client.reserve_stock = AsyncMock(return_value={"success": [{"sku_id": "sku-001", "reserved": -3, "remaining": 12}]})
 
     response = client.post(
-        f"/api/v1/orders/{order.order_id}/cancel?user_id={user_id}"
+        f"/api/v1/orders/{order.order_id}/cancel",
+        headers={"X-Test-User-Id": user_id}
     )
     assert response.status_code == 200
     data = response.json()
@@ -93,7 +94,8 @@ async def test_unreserve_failure_transitions_to_cancel_pending(
     )
 
     response = client.post(
-        f"/api/v1/orders/{order.order_id}/cancel?user_id={user_id}"
+        f"/api/v1/orders/{order.order_id}/cancel",
+        headers={"X-Test-User-Id": user_id}
     )
     assert response.status_code == 200
     data = response.json()
@@ -125,7 +127,8 @@ async def test_cancel_assembling_order_returns_409(
     b2b_client.reserve_stock.reset_mock()
 
     response = client.post(
-        f"/api/v1/orders/{order.order_id}/cancel?user_id={user_id}"
+        f"/api/v1/orders/{order.order_id}/cancel",
+        headers={"X-Test-User-Id": user_id}
     )
     assert response.status_code == 409
     data = response.json()
@@ -157,7 +160,8 @@ async def test_other_user_order_returns_404(
     await db_session.commit()
 
     response = client.post(
-        f"/api/v1/orders/{order.order_id}/cancel?user_id={user_a}"
+        f"/api/v1/orders/{order.order_id}/cancel",
+        headers={"X-Test-User-Id": user_a}
     )
     assert response.status_code == 404
     data = response.json()
@@ -196,7 +200,8 @@ async def test_cancel_retry_success(
     b2b_client.reserve_stock = AsyncMock(return_value={"success": [{"sku_id": "sku-retry", "reserved": -1, "remaining": 10}]})
 
     response = client.post(
-        f"/api/v1/orders/{order.order_id}/cancel-retry?user_id={user_id}"
+        f"/api/v1/orders/{order.order_id}/cancel-retry",
+        headers={"X-Test-User-Id": user_id}
     )
     assert response.status_code == 200
     data = response.json()
@@ -222,7 +227,8 @@ async def test_cancel_retry_wrong_status_returns_400(
     await db_session.commit()
 
     response = client.post(
-        f"/api/v1/orders/{order.order_id}/cancel-retry?user_id={user_id}"
+        f"/api/v1/orders/{order.order_id}/cancel-retry",
+        headers={"X-Test-User-Id": user_id}
     )
     assert response.status_code == 400
     data = response.json()

@@ -169,8 +169,8 @@ async def test_blocked_product_excluded_from_list(client: TestClient, db_session
     b2b_client.get_product_by_id = AsyncMock(return_value=product)
     client.post("/api/v1/wishlist", json={"product_id": "p-active"}, headers=_auth_headers("user-block"))
 
-    # Now make B2B return None (simulating blocked)
-    b2b_client.get_product_by_id = AsyncMock(return_value=None)
+    # Now make B2B return None (simulating blocked) — batch endpoint
+    b2b_client.get_products_by_ids = AsyncMock(return_value={})
     resp = client.get("/api/v1/wishlist", headers=_auth_headers("user-block"))
 
     assert resp.status_code == 200
@@ -188,12 +188,14 @@ async def test_blocked_product_excluded_among_others(client: TestClient, db_sess
     b2b_client.get_product_by_id = AsyncMock(return_value=_make_product("p2", "Blocked", 200.0))
     client.post("/api/v1/wishlist", json={"product_id": "p2"}, headers=_auth_headers(user_id))
 
-    def side_effect(pid):
-        if pid == "p1":
-            return _make_product("p1", "Good", 100.0)
-        return None
+    def side_effect(pids):
+        result = {}
+        for pid in pids:
+            if pid == "p1":
+                result[pid] = _make_product("p1", "Good", 100.0)
+        return result
 
-    b2b_client.get_product_by_id = AsyncMock(side_effect=side_effect)
+    b2b_client.get_products_by_ids = AsyncMock(side_effect=side_effect)
     resp = client.get("/api/v1/wishlist", headers=_auth_headers(user_id))
 
     assert resp.status_code == 200

@@ -93,7 +93,7 @@ async def get_collections(db: AsyncSession = Depends(get_db)):
 
 @router.get("/collections/{collection_id}", response_model=Collection)
 async def get_collection(
-    collection_id: int,
+    collection_id: str,
     db: AsyncSession = Depends(get_db),
 ):
     """Get a single collection with product details enriched from B2B.
@@ -178,11 +178,22 @@ async def get_collection(
 @router.get("", response_model=dict)
 async def get_home_data(db: AsyncSession = Depends(get_db)):
     """Get all data needed for home page in one call."""
-    banners = await get_active_banners(db)
-    collections = await get_collections(db)
+    banners = await get_active_banners(db=db)
+    collections = await get_collections(db=db)
+
+    # Featured categories: top-level categories from B2B
+    try:
+        flat_categories = await b2b_client.get_categories()
+        featured_categories = [
+            {"category_id": c.get("category_id", ""), "name": c.get("name", ""), "parent_id": c.get("parent_id")}
+            for c in flat_categories
+            if not c.get("parent_id")
+        ][:5]
+    except B2BClientError:
+        featured_categories = []
 
     return {
         "banners": banners,
         "collections": collections,
-        "featured_categories": []
+        "featured_categories": featured_categories,
     }

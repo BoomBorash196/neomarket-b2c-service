@@ -42,14 +42,14 @@ def _make_product_detail(
     price: float,
     category_id: str = "cat1",
     parent_category_id: str | None = None,
-    available: bool = True,
+    active_quantity: int = 1,
 ):
     return {
-        "product_id": product_id,
+        "id": product_id,
         "title": title,
         "main_image_url": "http://img",
         "min_price": price,
-        "is_available": available,
+        "active_quantity": active_quantity,
         "description": "",
         "images": [],
         "characteristics": {},
@@ -61,16 +61,16 @@ def _make_product_detail(
 
 def _make_similar_product(product_id: str, title: str, price: float = 100.0):
     return {
-        "product_id": product_id,
+        "id": product_id,
         "title": title,
         "main_image_url": "http://img",
         "min_price": price,
-        "is_available": True,
+        "active_quantity": 1,
     }
 
 
 def _mock_similar_result(products):
-    return {"products": products}
+    return {"items": products}
 
 
 # ======================================================================

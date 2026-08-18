@@ -4,6 +4,7 @@ Revision ID: 001
 Revises: 
 Create Date: 2026-05-21
 
+All primary keys are UUID strings (36 chars).
 """
 from typing import Sequence, Union
 
@@ -11,7 +12,6 @@ from alembic import op
 import sqlalchemy as sa
 
 
-# revision identifiers, used by Alembic.
 revision: str = '001'
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
@@ -22,7 +22,7 @@ def upgrade() -> None:
     # Cart
     op.create_table(
         'cart_items',
-        sa.Column('cart_item_id', sa.Integer(), nullable=False),
+        sa.Column('cart_item_id', sa.String(36), nullable=False),
         sa.Column('user_id', sa.String(length=64), nullable=False),
         sa.Column('sku_id', sa.String(length=64), nullable=False),
         sa.Column('quantity', sa.Integer(), nullable=False, default=1),
@@ -35,7 +35,7 @@ def upgrade() -> None:
     # Wishlist
     op.create_table(
         'wishlist_items',
-        sa.Column('wishlist_item_id', sa.Integer(), nullable=False),
+        sa.Column('wishlist_item_id', sa.String(36), nullable=False),
         sa.Column('user_id', sa.String(length=64), nullable=False),
         sa.Column('product_id', sa.String(length=64), nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now()),
@@ -47,7 +47,7 @@ def upgrade() -> None:
     # Orders
     op.create_table(
         'orders',
-        sa.Column('order_id', sa.Integer(), nullable=False),
+        sa.Column('order_id', sa.String(36), nullable=False),
         sa.Column('user_id', sa.String(length=64), nullable=False),
         sa.Column('status', sa.Enum('CREATED', 'PAID', 'ASSEMBLING', 'DELIVERING', 'DELIVERED', 'CANCELLED', name='orderstatus'), nullable=False),
         sa.Column('total_amount', sa.Float(), nullable=False),
@@ -60,13 +60,14 @@ def upgrade() -> None:
     # Order Items
     op.create_table(
         'order_items',
-        sa.Column('order_item_id', sa.Integer(), nullable=False),
-        sa.Column('order_id', sa.Integer(), nullable=False),
+        sa.Column('order_item_id', sa.String(36), nullable=False),
+        sa.Column('order_id', sa.String(36), nullable=False),
         sa.Column('sku_id', sa.String(length=64), nullable=False),
+        sa.Column('sku_name', sa.String(length=255), nullable=False, server_default=''),
         sa.Column('product_id', sa.String(length=64), nullable=False),
         sa.Column('product_title', sa.String(length=255), nullable=False),
         sa.Column('quantity', sa.Integer(), nullable=False),
-        sa.Column('price', sa.Float(), nullable=False),
+        sa.Column('unit_price', sa.Float(), nullable=False),
         sa.ForeignKeyConstraint(['order_id'], ['orders.order_id'], ondelete='CASCADE'),
         sa.PrimaryKeyConstraint('order_item_id')
     )
@@ -74,7 +75,7 @@ def upgrade() -> None:
     # Collections
     op.create_table(
         'collections',
-        sa.Column('collection_id', sa.Integer(), nullable=False),
+        sa.Column('collection_id', sa.String(36), nullable=False),
         sa.Column('title', sa.String(length=100), nullable=False),
         sa.Column('description', sa.Text()),
         sa.Column('product_ids', sa.Text(), nullable=False),
@@ -87,7 +88,7 @@ def upgrade() -> None:
     # Banners
     op.create_table(
         'banners',
-        sa.Column('banner_id', sa.Integer(), nullable=False),
+        sa.Column('banner_id', sa.String(36), nullable=False),
         sa.Column('title', sa.String(length=100), nullable=False),
         sa.Column('image_url', sa.String(length=500), nullable=False),
         sa.Column('link_url', sa.String(length=500)),
