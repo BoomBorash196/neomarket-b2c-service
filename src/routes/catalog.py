@@ -126,7 +126,17 @@ def _normalise_facets(raw_facets: dict) -> List[FacetBucket]:
         facets.append(FacetBucket(name=field_name, label=field_name.replace("_", " ").title(), values=facet_values))
     return facets
 async def _map_b2b_product(raw: dict) -> dict:
-    """Normalise a B2B product dict into ProductDetail shape."""
+    """Normalise a B2B product dict into ProductDetail shape.
+
+    B2B ProductPublicShortResponse fields:
+      - id (str)
+      - title (str)
+      - cover_image (str)
+      - min_price (int)
+      - images (list[ImageInfo])
+      - characteristics (dict)
+      - skus (list[SKU])
+    """
     images_raw = raw.get("images", [])
     images = []
     for img in images_raw:
@@ -136,11 +146,11 @@ async def _map_b2b_product(raw: dict) -> dict:
             images.append({"url": img, "alt": None})
 
     return {
-        "id": str(raw.get("product_id", "")),
+        "id": str(raw.get("id", "")),
         "name": raw.get("title", ""),
-        "main_image_url": raw.get("main_image_url", ""),
-        "min_price": int(raw.get("min_price", 0.0)),
-        "has_stock": bool(raw.get("is_available", True)),
+        "main_image_url": raw.get("cover_image", ""),
+        "min_price": int(raw.get("min_price", 0)),
+        "has_stock": True,
         "description": raw.get("description", ""),
         "images": images,
         "characteristics": raw.get("characteristics", {}),
@@ -256,14 +266,14 @@ async def get_products(
             brand=brand,
             sort_by=sort_by,
             sort_order=sort_order,
-            page=offset // limit + 1 if limit > 0 else 1,
-            page_size=limit,
+            limit=limit,
+            offset=offset,
         )
     except B2BClientError as exc:
         raise _b2b_error(502, exc.message)
 
     # --- Map response ---
-    products = [_map_b2b_product(p) for p in result.get("products", [])]
+    products = [_map_b2b_product(p) for p in result.get("items", [])]
 
     product_details = []
     for p in products:
@@ -283,7 +293,7 @@ async def get_products(
 
     return PaginatedCatalogProducts(
         items=product_details,
-        total_count=result.get("total", len(product_details)),
+        total_count=result.get("total_count", len(product_details)),
         limit=limit,
         offset=offset,
     )
@@ -426,16 +436,16 @@ async def get_similar_products(
             raise _b2b_error(502, exc.message)
 
         for raw in similar_result.get("products", []):
-            pid = raw.get("product_id", "")
+            pid = raw.get("id", "")
             if pid and pid != product_id and pid not in similar_ids:
                 similar_ids.add(pid)
                 recommendations.append(
                     ProductBasic(
                         id=pid,
                         name=raw.get("title", ""),
-                        main_image_url=raw.get("main_image_url", ""),
-                        min_price=float(raw.get("min_price", 0.0)),
-                        has_stock=bool(raw.get("is_available", True)),
+                        main_image_url=raw.get("cover_image", ""),
+                        min_price=int(raw.get("min_price", 0)),
+                        has_stock=True,
                     )
                 )
                 if len(recommendations) >= SIMILAR_LIMIT:
@@ -457,16 +467,16 @@ async def get_similar_products(
             pass
         else:
             for raw in more_result.get("products", []):
-                pid = raw.get("product_id", "")
+                pid = raw.get("id", "")
                 if pid and pid != product_id and pid not in similar_ids:
                     similar_ids.add(pid)
                     recommendations.append(
                         ProductBasic(
                             id=pid,
                             name=raw.get("title", ""),
-                            main_image_url=raw.get("main_image_url", ""),
-                            min_price=float(raw.get("min_price", 0.0)),
-                            has_stock=bool(raw.get("is_available", True)),
+                            main_image_url=raw.get("cover_image", ""),
+                            min_price=int(raw.get("min_price", 0)),
+                            has_stock=True,
                         )
                     )
                     if len(recommendations) >= SIMILAR_LIMIT:

@@ -94,14 +94,14 @@ class B2BClient:
         brand: Optional[str] = None,
         sort_by: Optional[str] = None,
         sort_order: Optional[str] = "asc",
-        page: int = 1,
-        page_size: int = 20,
+        limit: int = 20,
+        offset: int = 0,
     ) -> dict:
         """Get products with filtering, sorting, and pagination.
 
         Only returns products with status = MODERATED, deleted = false, active_quantity > 0.
         """
-        params: dict = {"page": page, "page_size": page_size}
+        params: dict = {"limit": limit, "offset": offset}
         if category_id:
             params["category_id"] = category_id
         if search:
