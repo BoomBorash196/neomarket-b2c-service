@@ -40,12 +40,6 @@ def upgrade() -> None:
     )
     op.execute('UPDATE order_items SET unit_price = price')
 
-    # Fix order_id column type from Integer to String (was created as Integer in 001)
-    op.alter_column('order_items', 'order_id',
-                    existing_type=sa.Integer(),
-                    type_=sa.String(64),
-                    existing_nullable=False)
-
 
 def downgrade() -> None:
     op.drop_column('order_items', 'unit_price')

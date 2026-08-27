@@ -17,20 +17,27 @@ class OrderStatus(str, Enum):
     CANCEL_PENDING = "CANCEL_PENDING"  # unreserve failed, retry scheduled
 
 
+# --- Image schema ---
+class ImageInfo(BaseModel):
+    """Product image object per B2C specification."""
+    url: str
+    alt: Optional[str] = None
+
+
 # --- Product schemas (from B2B) ---
 class ProductBasic(BaseModel):
     """Basic product info from B2B."""
     id: str
     name: str
     main_image_url: str
-    min_price: float
+    min_price: int
     has_stock: bool
 
 
 class ProductDetail(ProductBasic):
     """Full product details."""
     description: str
-    images: List[str]
+    images: List[ImageInfo]
     characteristics: dict[str, str]
     skus: List["SKUInfo"]
 
@@ -290,10 +297,10 @@ class ProductDetailSchema(BaseModel):
     id: str
     name: str
     main_image_url: str
-    min_price: float
+    min_price: int
     has_stock: bool
     description: str
-    images: List[str]
+    images: List[ImageInfo]
     characteristics: dict[str, str]
     skus: List["SKUInfo"]
 

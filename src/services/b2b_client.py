@@ -155,7 +155,7 @@ class B2BClient:
         except B2BClientError as exc:
             raise exc
 
-    async def get_products_batch(self, product_ids: list[int]) -> dict[str, dict]:
+    async def get_products_batch(self, product_ids: list[str]) -> dict[str, dict]:
         """Get multiple products by IDs (batch request)."""
         try:
             resp = await self._request("POST", "/products/batch", json_body={"product_ids": product_ids})

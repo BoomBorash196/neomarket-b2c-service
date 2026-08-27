@@ -125,16 +125,24 @@ def _normalise_facets(raw_facets: dict) -> List[FacetBucket]:
 
         facets.append(FacetBucket(name=field_name, label=field_name.replace("_", " ").title(), values=facet_values))
     return facets
-def _map_b2b_product(raw: dict) -> dict:
+async def _map_b2b_product(raw: dict) -> dict:
     """Normalise a B2B product dict into ProductDetail shape."""
+    images_raw = raw.get("images", [])
+    images = []
+    for img in images_raw:
+        if isinstance(img, dict):
+            images.append({"url": img.get("url", ""), "alt": img.get("alt")})
+        elif isinstance(img, str):
+            images.append({"url": img, "alt": None})
+
     return {
         "id": str(raw.get("product_id", "")),
         "name": raw.get("title", ""),
         "main_image_url": raw.get("main_image_url", ""),
-        "min_price": float(raw.get("min_price", 0.0)),
+        "min_price": int(raw.get("min_price", 0.0)),
         "has_stock": bool(raw.get("is_available", True)),
         "description": raw.get("description", ""),
-        "images": raw.get("images", []),
+        "images": images,
         "characteristics": raw.get("characteristics", {}),
         "skus": _map_b2b_skus(raw.get("skus", [])),
     }
@@ -285,7 +293,7 @@ async def get_products(
 # GET /api/v1/catalog/products/{product_id}
 # ---------------------------------------------------------------------------
 @router.get("/products/{product_id}", response_model=ProductDetail)
-async def get_product(product_id: str, db: AsyncSession = Depends(get_db)):
+async def get_product(product_id: str):
     """Get full product details."""
     try:
         product_data = await b2b_client.get_product_by_id(product_id)
