@@ -84,8 +84,9 @@ async def test_add_sku_increments_quantity_if_already_in_cart(
     b2b_client.get_sku_by_id = AsyncMock(return_value=mock_data)
     b2b_client.get_skus_by_ids = AsyncMock(return_value={sku_id: mock_data})
     client.post(
-        f"/api/v1/cart/items?user_id={user_id}",
+        "/api/v1/cart/items",
         json={"sku_id": sku_id, "quantity": 2},
+        headers={"X-Test-User-Id": user_id},
     )
 
     # Verify one row exists with quantity=2
@@ -102,8 +103,9 @@ async def test_add_sku_increments_quantity_if_already_in_cart(
     b2b_client.get_sku_by_id = AsyncMock(return_value=mock_data)
     b2b_client.get_skus_by_ids = AsyncMock(return_value={sku_id: mock_data})
     client.post(
-        f"/api/v1/cart/items?user_id={user_id}",
+        "/api/v1/cart/items",
         json={"sku_id": sku_id, "quantity": 3},
+        headers={"X-Test-User-Id": user_id},
     )
 
     # Refresh and check quantity is now 5
@@ -145,7 +147,7 @@ async def test_get_cart_enriched_with_b2b_data(
     )
 
     b2b_client.get_skus_by_ids = AsyncMock(return_value={sku_id: mock_data})
-    response = client.get(f"/api/v1/cart?user_id={user_id}")
+    response = client.get("/api/v1/cart", headers={"X-Test-User-Id": user_id})
 
     assert response.status_code == 200
     data = response.json()
@@ -188,7 +190,7 @@ async def test_unavailable_sku_shown_with_reason(
     }
 
     b2b_client.get_skus_by_ids = AsyncMock(return_value=skus_data)
-    response = client.get(f"/api/v1/cart?user_id={user_id}")
+    response = client.get("/api/v1/cart", headers={"X-Test-User-Id": user_id})
 
     assert response.status_code == 200
     data = response.json()
@@ -282,13 +284,28 @@ async def test_idor_protection_cart_access(
     db_session.add(CartItemModel(user_id=user_b, sku_id="sku-secret", quantity=1))
     await db_session.commit()
 
-    # User A tries to GET B's cart
-    response = client.get(f"/api/v1/cart?user_id={user_b}")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["items"] == []
-    assert data["total_items"] == 0
+    # User A tries to GET B's cart — no header → 401
+    response = client.get("/api/v1/cart")
+    assert response.status_code == 401
 
-    # User A tries to DELETE B's cart item
-    response = client.delete(f"/api/v1/cart/items/sku-secret?user_id={user_a}")
-    assert response.status_code == 404
+    # User A tries to DELETE B's cart item — no header → 401
+    response = client.delete("/api/v1/cart/items/sku-secret")
+    assert response.status_code == 401
+
+
+# =====================================================================
+# Extra: query param user_id is ignored (IDOR)
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_query_param_user_id_ignored(client: TestClient, db_session):
+    """Query param user_id must be ignored — must use X-User-Id header."""
+    user_b = "user-b"
+
+    # User B has a cart item
+    db_session.add(CartItemModel(user_id=user_b, sku_id="sku-secret", quantity=1))
+    await db_session.commit()
+
+    # Trying to access with ?user_id=... should fail (401, no header)
+    response = client.get(f"/api/v1/cart?user_id={user_b}")
+    assert response.status_code == 401

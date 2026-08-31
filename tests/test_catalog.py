@@ -39,28 +39,46 @@ def client():
 # ======================================================================
 
 def _make_product(product_id: str, title: str, price: float, **kwargs):
+    """Build a B2B product dict matching the real B2B response schema."""
+    images = kwargs.get("images", [{"id": "img1", "url": kwargs.get("image", "http://img"), "ordering": 0}])
     return {
-        "product_id": product_id,
+        "id": product_id,
         "title": title,
         "main_image_url": kwargs.get("image", "http://img"),
         "min_price": price,
-        "is_available": kwargs.get("available", True),
+        "active_quantity": kwargs.get("available", 1),
+        "stock_quantity": kwargs.get("stock", 1),
         "description": kwargs.get("desc", ""),
-        "images": [kwargs.get("image", "http://img")],
+        "images": images,
         "characteristics": kwargs.get("chars", {}),
         "skus": kwargs.get("skus", []),
     }
 
 
 def _mock_b2b_products_result(products, total=None):
+    """Build a B2B products response matching the real B2B response schema."""
     return {
-        "products": products,
-        "total": total if total is not None else len(products),
+        "items": products,
+        "total_count": total if total is not None else len(products),
     }
 
 
 def _mock_b2b_facets_result(facets_dict):
     return {"facets": facets_dict}
+
+
+def _make_sku(sku_id: str, **kwargs):
+    """Build a B2B SKU dict matching the real B2B response schema."""
+    return {
+        "sku_id": sku_id,
+        "color": kwargs.get("color", None),
+        "size": kwargs.get("size", None),
+        "price": kwargs.get("price", 0.0),
+        "stock_quantity": kwargs.get("stock", 0),
+        "active_quantity": kwargs.get("active", 0),
+        "is_active": kwargs.get("is_active", True),
+        "discount": kwargs.get("discount", 0.0),
+    }
 
 
 # ======================================================================
@@ -108,8 +126,9 @@ def test_catalog_returns_filtered_sorted_products(client: TestClient):
     # Verify params passed through to B2B
     call_kwargs = mock_b2b.get_products.call_args.kwargs
     assert call_kwargs["category_id"] == "cat1"
-    assert call_kwargs["sort_by"] == "price"
-    assert call_kwargs["sort_order"] == "asc"
+    assert call_kwargs["sort"] == "price_asc"
+    assert call_kwargs["limit"] == 20
+    assert call_kwargs["offset"] == 0
 
 
 def test_catalog_returns_filtered_sorted_products_in_stock(client: TestClient):
@@ -134,7 +153,7 @@ def test_catalog_returns_filtered_sorted_products_in_stock(client: TestClient):
     assert data["items"][0]["has_stock"] is True
 
     call_kwargs = mock_b2b.get_products.call_args.kwargs
-    assert call_kwargs["in_stock"] is True
+    assert call_kwargs["filters"]["in_stock"] is True
 
 
 def test_catalog_price_range_filter(client: TestClient):
@@ -195,7 +214,7 @@ def test_catalog_brand_filter(client: TestClient):
 
     assert resp.status_code == 200
     call_kwargs = mock_b2b.get_products.call_args.kwargs
-    assert call_kwargs["brand"] == "apple"
+    assert call_kwargs["filters"]["brand"] == "apple"
 
 
 def test_catalog_empty_results(client: TestClient):
@@ -327,7 +346,7 @@ def test_facets_with_in_stock_filter(client: TestClient):
 
     assert resp.status_code == 200
     call_kwargs = mock_b2b.get_facets.call_args.kwargs
-    assert call_kwargs["in_stock"] is True
+    assert call_kwargs["filters"]["in_stock"] is True
 
 
 # ======================================================================
@@ -358,7 +377,7 @@ def test_invalid_sort_returns_400(client: TestClient):
 
 
 def test_sort_price_asc(client: TestClient):
-    """Sort=price_asc maps to sort_by=price, sort_order=asc for B2B."""
+    """Sort=price_asc maps to sort=price_asc for B2B."""
     products = [_make_product("p1", "X", 10.0)]
     mock_result = _mock_b2b_products_result(products, total=1)
 
@@ -372,12 +391,11 @@ def test_sort_price_asc(client: TestClient):
 
     assert resp.status_code == 200
     call_kwargs = mock_b2b.get_products.call_args.kwargs
-    assert call_kwargs["sort_by"] == "price"
-    assert call_kwargs["sort_order"] == "asc"
+    assert call_kwargs["sort"] == "price_asc"
 
 
 def test_sort_new(client: TestClient):
-    """Sort=new maps to sort_by=created_at, sort_order=desc for B2B."""
+    """Sort=new maps to sort=new for B2B."""
     products = [_make_product("p1", "X", 10.0)]
     mock_result = _mock_b2b_products_result(products, total=1)
 
@@ -391,12 +409,11 @@ def test_sort_new(client: TestClient):
 
     assert resp.status_code == 200
     call_kwargs = mock_b2b.get_products.call_args.kwargs
-    assert call_kwargs["sort_by"] == "created_at"
-    assert call_kwargs["sort_order"] == "desc"
+    assert call_kwargs["sort"] == "new"
 
 
 def test_default_sort_is_popularity(client: TestClient):
-    """Default sort (no sort param) is popularity desc."""
+    """Default sort (no sort param) passes sort=None to B2B."""
     products = [_make_product("p1", "X", 10.0)]
     mock_result = _mock_b2b_products_result(products, total=1)
 
@@ -410,8 +427,7 @@ def test_default_sort_is_popularity(client: TestClient):
 
     assert resp.status_code == 200
     call_kwargs = mock_b2b.get_products.call_args.kwargs
-    assert call_kwargs["sort_by"] == "popularity"
-    assert call_kwargs["sort_order"] == "desc"
+    assert call_kwargs["sort"] is None
 
 
 def _b2b_error_mock(message: str = "Service Unavailable"):
@@ -511,13 +527,18 @@ def test_blocked_product_returns_404(client: TestClient):
 def test_product_card_returns_full_data_with_skus(client: TestClient):
     """Happy path: product card returns full data with SKUs."""
     product = {
-        "product_id": "p1",
+        "id": "p1",
         "title": "Wireless Headphones",
         "main_image_url": "http://main.jpg",
         "min_price": 4999.0,
-        "is_available": True,
+        "active_quantity": 10,
+        "stock_quantity": 10,
         "description": "High-quality wireless headphones with ANC.",
-        "images": ["http://img1.jpg", "http://img2.jpg", "http://img3.jpg"],
+        "images": [
+            {"id": "img1", "url": "http://img1.jpg", "ordering": 0},
+            {"id": "img2", "url": "http://img2.jpg", "ordering": 1},
+            {"id": "img3", "url": "http://img3.jpg", "ordering": 2},
+        ],
         "characteristics": {"color": "black", "bluetooth": "5.0"},
         "skus": [
             {
@@ -525,7 +546,8 @@ def test_product_card_returns_full_data_with_skus(client: TestClient):
                 "color": "black",
                 "size": None,
                 "price": 4999.0,
-                "quantity_available": 10,
+                "stock_quantity": 10,
+                "active_quantity": 10,
                 "is_active": True,
                 "discount": 500.0,
             },
@@ -534,7 +556,8 @@ def test_product_card_returns_full_data_with_skus(client: TestClient):
                 "color": "white",
                 "size": None,
                 "price": 5299.0,
-                "quantity_available": 3,
+                "stock_quantity": 3,
+                "active_quantity": 3,
                 "is_active": True,
                 "discount": 0.0,
             },
@@ -578,11 +601,12 @@ def test_product_card_returns_full_data_with_skus(client: TestClient):
 def test_cost_price_absent_in_response(client: TestClient):
     """CRITICAL: cost_price must never appear in B2C SKU response."""
     product = {
-        "product_id": "p1",
+        "id": "p1",
         "title": "Test Product",
         "main_image_url": "http://img.jpg",
         "min_price": 1000.0,
-        "is_available": True,
+        "active_quantity": 5,
+        "stock_quantity": 5,
         "description": "Test",
         "images": [],
         "characteristics": {},
@@ -591,7 +615,8 @@ def test_cost_price_absent_in_response(client: TestClient):
                 "sku_id": "s1",
                 "color": "red",
                 "price": 1000.0,
-                "quantity_available": 5,
+                "stock_quantity": 5,
+                "active_quantity": 5,
                 "is_active": True,
                 "cost_price": 250.0,
                 "reserved_quantity": 2,
@@ -626,13 +651,14 @@ def test_cost_price_absent_in_response(client: TestClient):
 # ======================================================================
 
 def test_sku_without_stock_is_shown_as_unavailable(client: TestClient):
-    """SKU with quantity_available = 0 is returned but with in_stock = false."""
+    """SKU with stock_quantity = 0 is returned but with in_stock = false."""
     product = {
-        "product_id": "p1",
+        "id": "p1",
         "title": "Limited Product",
         "main_image_url": "http://img.jpg",
         "min_price": 2000.0,
-        "is_available": True,
+        "active_quantity": 5,
+        "stock_quantity": 5,
         "description": "Only some SKUs in stock",
         "images": [],
         "characteristics": {},
@@ -641,14 +667,16 @@ def test_sku_without_stock_is_shown_as_unavailable(client: TestClient):
                 "sku_id": "s1-in-stock",
                 "color": "red",
                 "price": 2000.0,
-                "quantity_available": 5,
+                "stock_quantity": 5,
+                "active_quantity": 5,
                 "is_active": True,
             },
             {
                 "sku_id": "s2-out-of-stock",
                 "color": "blue",
                 "price": 2200.0,
-                "quantity_available": 0,
+                "stock_quantity": 0,
+                "active_quantity": 0,
                 "is_active": True,
             },
         ],
@@ -700,11 +728,11 @@ def test_get_categories(client: TestClient):
 # ======================================================================
 
 def test_b2b_client_sends_x_service_key():
-    """B2B client includes X-Service-Key header on requests."""
+    """B2B client includes X-Service-Key header on internal requests."""
     from src.services.b2b_client import B2BClient
 
     client = B2BClient()
-    headers = client._headers()
+    headers = client._internal_headers()
     assert "X-Service-Key" in headers
     assert headers["X-Service-Key"] == "neomarket-b2c-secret-key"
 
@@ -782,13 +810,11 @@ def test_combined_filters(client: TestClient):
     assert call_kwargs["search"] == "phone"
     assert call_kwargs["min_price"] == 100
     assert call_kwargs["max_price"] == 200
-    assert call_kwargs["in_stock"] is True
-    assert call_kwargs["brand"] == "apple"
-    assert call_kwargs["sort_by"] == "price"
-    assert call_kwargs["sort_order"] == "desc"
-    # offset=50, limit=50 → page = 50//50 + 1 = 2
-    assert call_kwargs["page"] == 2
-    assert call_kwargs["page_size"] == 50
+    assert call_kwargs["filters"]["in_stock"] is True
+    assert call_kwargs["filters"]["brand"] == "apple"
+    assert call_kwargs["sort"] == "price_desc"
+    assert call_kwargs["limit"] == 50
+    assert call_kwargs["offset"] == 50
 
 
 # ======================================================================

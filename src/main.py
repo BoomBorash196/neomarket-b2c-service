@@ -1,5 +1,6 @@
 """Main FastAPI application."""
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -9,6 +10,15 @@ from starlette.status import HTTP_409_CONFLICT, HTTP_500_INTERNAL_SERVER_ERROR
 from src.config import settings
 from src.database import engine, Base
 from src.routes import cart, order, wishlist, catalog, home, recommendations, subscriptions
+from src.routes.banner_events import router as banner_events_router
+from src.services.b2b_client import b2b_client
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup/shutdown lifecycle."""
+    yield
+    await b2b_client.aclose()
 
 
 def create_app() -> FastAPI:
@@ -17,6 +27,7 @@ def create_app() -> FastAPI:
         title=settings.APP_NAME,
         version=settings.VERSION,
         description="B2C Buyer module for NeoMarket platform",
+        lifespan=lifespan,
     )
 
     # CORS
@@ -35,11 +46,11 @@ def create_app() -> FastAPI:
         if 'unique' in error_msg.lower() or 'duplicate' in error_msg.lower():
             return JSONResponse(
                 status_code=HTTP_409_CONFLICT,
-                content={"detail": "Resource already exists", "error": "DUPLICATE_ENTRY"}
+                content={"code": "DUPLICATE_ENTRY", "message": "Resource already exists"}
             )
         return JSONResponse(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"detail": "Database integrity error", "error": "DATABASE_INTEGRITY_ERROR"}
+            content={"code": "DATABASE_INTEGRITY_ERROR", "message": "Database integrity error"}
         )
 
     @app.exception_handler(HTTPException)
@@ -68,10 +79,11 @@ def create_app() -> FastAPI:
     app.include_router(cart.router, prefix="/api/v1/cart", tags=["Cart"])
     app.include_router(order.router, prefix="/api/v1/orders", tags=["Orders"])
     app.include_router(wishlist.router, prefix="/api/v1/wishlist", tags=["Wishlist"])
-    app.include_router(subscriptions.router, prefix="/api/v1/cart", tags=["Cart"])
     app.include_router(catalog.router, prefix="/api/v1/catalog", tags=["Catalog"])
     app.include_router(home.router, prefix="/api/v1/home", tags=["Home"])
     app.include_router(recommendations.router, prefix="/api/v1/recommendations", tags=["Recommendations"])
+    app.include_router(subscriptions.router, prefix="/api/v1/subscriptions", tags=["Subscriptions"])
+    app.include_router(banner_events_router, prefix="/api/v1/banner-events", tags=["Banner Events"])
 
     @app.get("/health")
     async def health_check():
