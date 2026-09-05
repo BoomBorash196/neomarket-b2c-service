@@ -45,14 +45,14 @@ def _make_product_detail(
     available: bool = True,
 ):
     return {
-        "product_id": product_id,
+        "id": product_id,
         "title": title,
-        "main_image_url": "http://img",
+        "cover_image": "http://img",
         "min_price": price,
-        "is_available": available,
+        "has_stock": available,
         "description": "",
         "images": [],
-        "characteristics": {},
+        "characteristics": [],
         "skus": [],
         "category_id": category_id,
         "parent_category_id": parent_category_id,
@@ -60,17 +60,18 @@ def _make_product_detail(
 
 
 def _make_similar_product(product_id: str, title: str, price: float = 100.0):
+    """B2B ProductPublicShortResponse-shaped fixture."""
     return {
-        "product_id": product_id,
+        "id": product_id,
         "title": title,
-        "main_image_url": "http://img",
+        "cover_image": "http://img",
         "min_price": price,
-        "is_available": True,
     }
 
 
 def _mock_similar_result(products):
-    return {"products": products}
+    # B2B /similar returns a plain array of ProductPublicShortResponse
+    return products
 
 
 # ======================================================================

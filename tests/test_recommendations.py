@@ -8,16 +8,18 @@ from src.services.b2b_client import b2b_client
 def test_get_recommendations(client: TestClient):
     """Test getting product recommendations with mocked B2B."""
     b2b_client.get_product_by_id = AsyncMock(return_value={
-        "product_id": "test_product_1",
+        "id": "test_product_1",
         "category_id": "cat1",
         "parent_category_id": "cat_parent",
     })
     b2b_client.get_products_by_category = AsyncMock(return_value={
-        "products": [
-            {"product_id": "rec1", "title": "Rec 1", "main_image_url": "http://img", "min_price": 100.0, "is_available": True},
-            {"product_id": "rec2", "title": "Rec 2", "main_image_url": "http://img", "min_price": 200.0, "is_available": True},
+        "items": [
+            {"id": "rec1", "title": "Rec 1", "cover_image": "http://img", "min_price": 100.0},
+            {"id": "rec2", "title": "Rec 2", "cover_image": "http://img", "min_price": 200.0},
         ],
-        "total": 2,
+        "total_count": 2,
+        "limit": 8,
+        "offset": 0,
     })
 
     response = client.get("/api/v1/recommendations/products/test_product_1?limit=4")

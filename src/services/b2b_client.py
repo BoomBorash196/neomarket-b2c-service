@@ -94,14 +94,15 @@ class B2BClient:
         brand: Optional[str] = None,
         sort_by: Optional[str] = None,
         sort_order: Optional[str] = "asc",
-        page: int = 1,
-        page_size: int = 20,
+        limit: int = 20,
+        offset: int = 0,
     ) -> dict:
         """Get products with filtering, sorting, and pagination.
 
         Only returns products with status = MODERATED, deleted = false, active_quantity > 0.
+        Pagination per B2B OpenAPI: limit/offset.
         """
-        params: dict = {"page": page, "page_size": page_size}
+        params: dict = {"limit": limit, "offset": offset}
         if category_id:
             params["category_id"] = category_id
         if search:
@@ -183,15 +184,15 @@ class B2BClient:
     async def get_products_by_category(
         self,
         category_id: str,
-        page: int = 1,
-        page_size: int = 20,
+        limit: int = 20,
+        offset: int = 0,
     ) -> dict:
         """Get products filtered by category."""
-        params: dict = {"category_id": category_id, "page": page, "page_size": page_size}
+        params: dict = {"category_id": category_id, "limit": limit, "offset": offset}
         try:
             return await self._request("GET", "/public/products", params=params)
         except B2BClientError:
-            return {"products": [], "total": 0}
+            return {"items": [], "total_count": 0, "limit": limit, "offset": offset}
 
     async def get_similar_products(
         self,
