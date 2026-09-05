@@ -39,12 +39,13 @@ def client():
 # ======================================================================
 
 def _make_product(product_id: str, title: str, price: float, **kwargs):
+    """B2B ProductPublicShortResponse-shaped fixture."""
     return {
-        "product_id": product_id,
+        "id": product_id,
         "title": title,
-        "main_image_url": kwargs.get("image", "http://img"),
+        "cover_image": kwargs.get("image", "http://img"),
         "min_price": price,
-        "is_available": kwargs.get("available", True),
+        "has_stock": kwargs.get("available", True),
         "description": kwargs.get("desc", ""),
         "images": [kwargs.get("image", "http://img")],
         "characteristics": kwargs.get("chars", {}),
@@ -53,9 +54,12 @@ def _make_product(product_id: str, title: str, price: float, **kwargs):
 
 
 def _mock_b2b_products_result(products, total=None):
+    """B2B ProductPublicPaginatedResponse-shaped envelope."""
     return {
-        "products": products,
-        "total": total if total is not None else len(products),
+        "items": products,
+        "total_count": total if total is not None else len(products),
+        "limit": 20,
+        "offset": 0,
     }
 
 
@@ -511,30 +515,34 @@ def test_blocked_product_returns_404(client: TestClient):
 def test_product_card_returns_full_data_with_skus(client: TestClient):
     """Happy path: product card returns full data with SKUs."""
     product = {
-        "product_id": "p1",
+        "id": "p1",
         "title": "Wireless Headphones",
-        "main_image_url": "http://main.jpg",
+        "cover_image": "http://main.jpg",
         "min_price": 4999.0,
-        "is_available": True,
+        "has_stock": True,
         "description": "High-quality wireless headphones with ANC.",
-        "images": ["http://img1.jpg", "http://img2.jpg", "http://img3.jpg"],
-        "characteristics": {"color": "black", "bluetooth": "5.0"},
+        "images": [
+            {"id": "i1", "url": "http://img1.jpg", "ordering": 0},
+            {"id": "i2", "url": "http://img2.jpg", "ordering": 1},
+            {"id": "i3", "url": "http://img3.jpg", "ordering": 2},
+        ],
+        "characteristics": [{"name": "color", "value": "black"}, {"name": "bluetooth", "value": "5.0"}],
         "skus": [
             {
-                "sku_id": "s1-black",
+                "id": "s1-black",
                 "color": "black",
                 "size": None,
                 "price": 4999.0,
-                "quantity_available": 10,
+                "active_quantity": 10,
                 "is_active": True,
                 "discount": 500.0,
             },
             {
-                "sku_id": "s2-white",
+                "id": "s2-white",
                 "color": "white",
                 "size": None,
                 "price": 5299.0,
-                "quantity_available": 3,
+                "active_quantity": 3,
                 "is_active": True,
                 "discount": 0.0,
             },
@@ -578,20 +586,20 @@ def test_product_card_returns_full_data_with_skus(client: TestClient):
 def test_cost_price_absent_in_response(client: TestClient):
     """CRITICAL: cost_price must never appear in B2C SKU response."""
     product = {
-        "product_id": "p1",
+        "id": "p1",
         "title": "Test Product",
-        "main_image_url": "http://img.jpg",
+        "cover_image": "http://img.jpg",
         "min_price": 1000.0,
-        "is_available": True,
+        "has_stock": True,
         "description": "Test",
         "images": [],
-        "characteristics": {},
+        "characteristics": [],
         "skus": [
             {
-                "sku_id": "s1",
+                "id": "s1",
                 "color": "red",
                 "price": 1000.0,
-                "quantity_available": 5,
+                "active_quantity": 5,
                 "is_active": True,
                 "cost_price": 250.0,
                 "reserved_quantity": 2,
@@ -628,27 +636,27 @@ def test_cost_price_absent_in_response(client: TestClient):
 def test_sku_without_stock_is_shown_as_unavailable(client: TestClient):
     """SKU with quantity_available = 0 is returned but with in_stock = false."""
     product = {
-        "product_id": "p1",
+        "id": "p1",
         "title": "Limited Product",
-        "main_image_url": "http://img.jpg",
+        "cover_image": "http://img.jpg",
         "min_price": 2000.0,
-        "is_available": True,
+        "has_stock": True,
         "description": "Only some SKUs in stock",
         "images": [],
-        "characteristics": {},
+        "characteristics": [],
         "skus": [
             {
-                "sku_id": "s1-in-stock",
+                "id": "s1-in-stock",
                 "color": "red",
                 "price": 2000.0,
-                "quantity_available": 5,
+                "active_quantity": 5,
                 "is_active": True,
             },
             {
-                "sku_id": "s2-out-of-stock",
+                "id": "s2-out-of-stock",
                 "color": "blue",
                 "price": 2200.0,
-                "quantity_available": 0,
+                "active_quantity": 0,
                 "is_active": True,
             },
         ],
@@ -680,8 +688,8 @@ def test_sku_without_stock_is_shown_as_unavailable(client: TestClient):
 def test_get_categories(client: TestClient):
     """GET /categories returns category tree from B2B."""
     categories = [
-        {"category_id": "cat1", "name": "Electronics", "parent_id": None},
-        {"category_id": "cat2", "name": "Phones", "parent_id": "cat1"},
+        {"id": "cat1", "name": "Electronics", "parent_id": None},
+        {"id": "cat2", "name": "Phones", "parent_id": "cat1"},
     ]
 
     with patch(CATALOG_B2B) as mock_b2b:
@@ -691,8 +699,9 @@ def test_get_categories(client: TestClient):
 
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data) == 2
-    assert data[0]["category_id"] == "cat1"
+    # Response is CategoryListResponse: {items: [...]}
+    assert len(data["items"]) == 2
+    assert data["items"][0]["category_id"] == "cat1"
 
 
 # ======================================================================
@@ -786,9 +795,9 @@ def test_combined_filters(client: TestClient):
     assert call_kwargs["brand"] == "apple"
     assert call_kwargs["sort_by"] == "price"
     assert call_kwargs["sort_order"] == "desc"
-    # offset=50, limit=50 → page = 50//50 + 1 = 2
-    assert call_kwargs["page"] == 2
-    assert call_kwargs["page_size"] == 50
+    # Pagination goes to B2B as limit/offset per B2B OpenAPI
+    assert call_kwargs["limit"] == 50
+    assert call_kwargs["offset"] == 50
 
 
 # ======================================================================

@@ -29,14 +29,6 @@ async def get_active_banners(
 
     conditions = [
         BannerModel.is_active == True,
-        or_(
-            BannerModel.starts_at.is_(None),
-            BannerModel.starts_at <= current,
-        ),
-        or_(
-            BannerModel.ends_at.is_(None),
-            BannerModel.ends_at >= current,
-        ),
     ]
 
     result = await db.execute(
@@ -54,8 +46,6 @@ async def get_active_banners(
             link_url=b.link_url,
             priority=b.priority,
             is_active=b.is_active,
-            starts_at=b.starts_at,
-            ends_at=b.ends_at,
         )
         for b in banners
     ]

@@ -42,16 +42,31 @@ def reset_b2b_mocks():
 # ======================================================================
 
 def _make_product(product_id: str, title: str, price: float, available: bool = True):
+    """B2B ProductPublicResponse-shaped fixture."""
+    skus = [
+        {
+            "id": f"{product_id}-sku-1",
+            "product_id": product_id,
+            "name": title,
+            "price": int(price),
+            "discount": 0,
+            "stock_quantity": 10 if available else 0,
+            "active_quantity": 10 if available else 0,
+            "article": None,
+            "images": [],
+            "characteristics": [],
+        }
+    ] if available else []
     return {
-        "product_id": product_id,
+        "id": product_id,
         "title": title,
-        "main_image_url": "http://img",
+        "cover_image": "http://img",
         "min_price": price,
-        "is_available": available,
+        "has_stock": available,
         "description": "",
         "images": [],
-        "characteristics": {},
-        "skus": [],
+        "characteristics": [],
+        "skus": skus,
     }
 
 
@@ -112,12 +127,14 @@ async def test_repeat_add_returns_200_not_duplicate(client: TestClient, db_sessi
     product = _make_product("p1", "Wireless Headphones", 4999.0)
     b2b_client.get_product_by_id = AsyncMock(return_value=product)
 
-    # Insert item directly into DB (first add)
-    new_item = WishlistItemModel(user_id="user-42", product_id="p1")
-    db_session.add(new_item)
-    await db_session.commit()
-    await db_session.refresh(new_item)
-    first_id = new_item.wishlist_item_id
+    # First add via HTTP (201)
+    resp1 = client.post(
+        "/api/v1/wishlist",
+        json={"product_id": "p1"},
+        headers=_auth_headers("user-42"),
+    )
+    assert resp1.status_code == 201
+    first_id = resp1.json()["wishlist_item_id"]
 
     # Verify 1 row in DB
     result = await db_session.execute(

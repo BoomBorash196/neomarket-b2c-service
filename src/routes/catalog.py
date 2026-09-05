@@ -123,18 +123,56 @@ def _normalise_facets(raw_facets: dict) -> List[FacetBucket]:
 
         facets.append(FacetBucket(name=field_name, label=field_name.replace("_", " ").title(), values=facet_values))
     return facets
+def _as_product_list(result) -> list:
+    """Normalise B2B list responses: plain array or paginated envelope."""
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict):
+        return result.get("items", [])
+    return []
+
+
+def _map_b2b_characteristics(raw_chars) -> dict:
+    """Map B2B characteristics [{name, value}] into a plain dict."""
+    if isinstance(raw_chars, dict):
+        return {str(k): str(v) for k, v in raw_chars.items()}
+    result: dict = {}
+    for item in raw_chars or []:
+        if isinstance(item, dict) and "name" in item:
+            result[str(item["name"])] = str(item.get("value", ""))
+    return result
+
+
 def _map_b2b_product(raw: dict) -> dict:
-    """Normalise a B2B product dict into ProductDetail shape."""
+    """Normalise a B2B product dict into ProductDetail shape.
+
+    Accepts both ProductPublicShortResponse (list) and ProductPublicResponse
+    (card): id/title/cover_image/min_price per b2b/openapi.yaml.
+    """
+    cover = raw.get("cover_image") or ""
+    images_raw = raw.get("images", [])
+    if images_raw and isinstance(images_raw[0], dict):
+        image_urls = [i.get("url", "") for i in images_raw if isinstance(i, dict)]
+    else:
+        image_urls = [str(i) for i in images_raw if i]
+    main_image = cover or (image_urls[0] if image_urls else "")
+
+    skus_raw = raw.get("skus", [])
+    has_stock = any(
+        (s.get("active_quantity", 0) if isinstance(s, dict) else 0) > 0
+        for s in skus_raw
+    ) if skus_raw else bool(raw.get("has_stock", True))
+
     return {
-        "id": str(raw.get("product_id", "")),
+        "id": str(raw.get("id", "")),
         "name": raw.get("title", ""),
-        "main_image_url": raw.get("main_image_url", ""),
+        "main_image_url": main_image,
         "min_price": float(raw.get("min_price", 0.0)),
-        "has_stock": bool(raw.get("is_available", True)),
+        "has_stock": has_stock,
         "description": raw.get("description", ""),
-        "images": raw.get("images", []),
-        "characteristics": raw.get("characteristics", {}),
-        "skus": _map_b2b_skus(raw.get("skus", [])),
+        "images": image_urls,
+        "characteristics": _map_b2b_characteristics(raw.get("characteristics", [])),
+        "skus": _map_b2b_skus(skus_raw),
     }
 
 
@@ -152,17 +190,18 @@ def _map_b2b_skus(raw_skus: list[dict]) -> list[dict]:
     for raw in raw_skus:
         # Strip excluded first
         filtered = {k: v for k, v in raw.items() if k not in excluded_keys}
+        available = int(filtered.pop("active_quantity", filtered.pop("quantity_available", 0)) or 0)
         sku = {
-            "id": filtered.pop("sku_id", ""),
+            "id": str(filtered.pop("id", filtered.pop("sku_id", ""))),
             "color": filtered.pop("color", None),
             "size": filtered.pop("size", None),
             "other_specs": filtered.pop("other_specs", None),
-            "price": filtered.pop("price", 0.0),
-            "available_quantity": filtered.pop("quantity_available", 0),
-            "is_active": filtered.pop("is_active", True),
-            "discount": filtered.pop("discount", 0.0),
+            "price": float(filtered.pop("price", 0.0)),
+            "available_quantity": available,
+            "is_active": bool(filtered.pop("is_active", True)),
+            "discount": float(filtered.pop("discount", 0.0)),
         }
-        sku["in_stock"] = bool(sku["available_quantity"] > 0)
+        sku["in_stock"] = available > 0
         skus.append(sku)
     return skus
 
@@ -183,7 +222,15 @@ async def get_categories():
     """Get the full category tree from B2B."""
     try:
         categories = await b2b_client.get_categories()
-        return categories
+        items = [
+            CategoryDetail(
+                category_id=str(c.get("id", c.get("category_id", ""))),
+                name=str(c.get("name", "")),
+                parent_id=c.get("parent_id"),
+            )
+            for c in categories
+        ]
+        return items
     except B2BClientError as exc:
         raise _b2b_error(502, exc.message)
 
@@ -238,14 +285,14 @@ async def get_products(
             brand=brand,
             sort_by=sort_by,
             sort_order=sort_order,
-            page=offset // limit + 1 if limit > 0 else 1,
-            page_size=limit,
+            limit=limit,
+            offset=offset,
         )
     except B2BClientError as exc:
         raise _b2b_error(502, exc.message)
 
-    # --- Map response ---
-    products = [_map_b2b_product(p) for p in result.get("products", [])]
+    # --- Map response (B2B contract: items/total_count) ---
+    products = [_map_b2b_product(p) for p in result.get("items", [])]
 
     product_details = []
     for p in products:
@@ -265,7 +312,7 @@ async def get_products(
 
     return PaginatedCatalogProducts(
         items=product_details,
-        total_count=result.get("total", len(product_details)),
+        total_count=result.get("total_count", len(product_details)),
         limit=limit,
         offset=offset,
     )
@@ -407,17 +454,17 @@ async def get_similar_products(
         except B2BClientError as exc:
             raise _b2b_error(502, exc.message)
 
-        for raw in similar_result.get("products", []):
-            pid = raw.get("product_id", "")
+        for raw in _as_product_list(similar_result):
+            pid = str(raw.get("id", ""))
             if pid and pid != product_id and pid not in similar_ids:
                 similar_ids.add(pid)
                 recommendations.append(
                     ProductBasic(
                         id=pid,
                         name=raw.get("title", ""),
-                        main_image_url=raw.get("main_image_url", ""),
+                        main_image_url=raw.get("cover_image") or "",
                         min_price=float(raw.get("min_price", 0.0)),
-                        has_stock=bool(raw.get("is_available", True)),
+                        has_stock=True,
                     )
                 )
                 if len(recommendations) >= SIMILAR_LIMIT:
@@ -438,22 +485,22 @@ async def get_similar_products(
             # Non-fatal — log and continue with what we have
             pass
         else:
-            for raw in more_result.get("products", []):
-                pid = raw.get("product_id", "")
+            for raw in _as_product_list(more_result):
+                pid = str(raw.get("id", ""))
                 if pid and pid != product_id and pid not in similar_ids:
                     similar_ids.add(pid)
                     recommendations.append(
                         ProductBasic(
                             id=pid,
                             name=raw.get("title", ""),
-                            main_image_url=raw.get("main_image_url", ""),
+                            main_image_url=raw.get("cover_image") or "",
                             min_price=float(raw.get("min_price", 0.0)),
-                            has_stock=bool(raw.get("is_available", True)),
+                            has_stock=True,
                         )
                     )
                     if len(recommendations) >= SIMILAR_LIMIT:
                         break
-            filled_from_parent = len(more_result.get("products", [])) > 0
+            filled_from_parent = len(_as_product_list(more_result)) > 0
 
     # Determine reason
     if not recommendations:
@@ -485,7 +532,7 @@ def _build_category_tree(flat_categories: List[dict]) -> List[CategoryNode]:
     roots: List[CategoryNode] = []
 
     for c in flat_categories:
-        cid = str(c.get("category_id", ""))
+        cid = str(c.get("id", c.get("category_id", "")))
         if not cid:
             continue
         by_id[cid] = CategoryNode(
@@ -527,7 +574,7 @@ def _build_breadcrumbs(
     """
     by_id: dict[str, dict] = {}
     for c in flat_categories:
-        cid = str(c.get("category_id", ""))
+        cid = str(c.get("id", c.get("category_id", "")))
         if cid:
             by_id[cid] = c
 
@@ -555,7 +602,7 @@ def _build_breadcrumbs(
     path.reverse()
     return [
         BreadcrumbItem(
-            category_id=str(p.get("category_id", "")),
+            category_id=str(p.get("id", p.get("category_id", ""))),
             name=str(p.get("name", "")),
             parent_id=p.get("parent_id"),
         )
