@@ -61,7 +61,7 @@ class CartItemCreate(BaseModel):
 
 class CartItem(BaseModel):
     """Cart item with product details."""
-    cart_item_id: int
+    cart_item_id: str
     sku_id: str
     product_id: str
     product_title: str
@@ -85,7 +85,7 @@ class UnavailableCartItem(BaseModel):
     but excluded from total_amount.  unavailable_reason is computed
     live from B2B — never stored in DB.
     """
-    cart_item_id: int
+    cart_item_id: str
     sku_id: str
     quantity: int
     product_id: str
@@ -111,8 +111,8 @@ class OrderCreate(BaseModel):
 
 class OrderItem(BaseModel):
     """Order item details — historical snapshot at purchase time."""
-    order_item_id: int
-    order_id: int
+    order_item_id: str
+    order_id: str
     sku_id: str
     sku_name: str
     product_id: str
@@ -123,7 +123,7 @@ class OrderItem(BaseModel):
 
 class Order(BaseModel):
     """Order with status and items."""
-    order_id: int
+    order_id: str
     user_id: str
     status: OrderStatus
     total_amount: float
@@ -147,7 +147,7 @@ class WishlistItemCreate(BaseModel):
 
 class WishlistItem(BaseModel):
     """Wishlist item with product info."""
-    wishlist_item_id: int
+    wishlist_item_id: str
     user_id: str
     product_id: str
     product_title: str
@@ -178,7 +178,7 @@ class SubscriptionCreate(BaseModel):
 
 class Subscription(BaseModel):
     """Subscription response."""
-    subscription_id: int
+    subscription_id: str
     user_id: str
     sku_id: str
     notify_on: str
@@ -192,6 +192,19 @@ class CategoryNode(BaseModel):
     name: str
     parent_id: Optional[str] = None
     children: List["CategoryNode"] = []
+
+
+class CategoryItem(BaseModel):
+    """Single category in flat list (B2B contract: id/name/parent_id)."""
+    category_id: str
+    name: str
+    parent_id: Optional[str] = None
+
+
+class CategoryListResponse(BaseModel):
+    """Envelope for flat category list."""
+    items: List[CategoryItem]
+
 
 
 class CategoryDetail(BaseModel):
@@ -216,7 +229,7 @@ class BreadcrumbsResponse(BaseModel):
 # --- Collection/Banner schemas ---
 class Banner(BaseModel):
     """Promotional banner."""
-    banner_id: int
+    banner_id: str
     title: str
     image_url: str
     link_url: str
@@ -228,7 +241,7 @@ class Banner(BaseModel):
 
 class BannerClickCreate(BaseModel):
     """Record a banner click for CTR analytics."""
-    banner_id: int
+    banner_id: str
     user_id: Optional[str] = None
 
 
@@ -242,7 +255,7 @@ class CollectionProduct(BaseModel):
 
 class Collection(BaseModel):
     """Product collection (e.g., "Hit of the season")."""
-    collection_id: int
+    collection_id: str
     title: str
     description: Optional[str] = None
     products: List[CollectionProduct]

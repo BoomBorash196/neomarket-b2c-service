@@ -20,6 +20,8 @@ from src.schemas import (
     RecommendationList,
     ProductBasic,
     CategoryDetail,
+    CategoryItem,
+    CategoryListResponse,
     BreadcrumbItem,
     BreadcrumbsResponse,
 )
@@ -217,20 +219,20 @@ def _b2b_error(status_code: int, message: str) -> HTTPException:
 # ---------------------------------------------------------------------------
 # GET /api/v1/catalog/categories
 # ---------------------------------------------------------------------------
-@router.get("/categories", response_model=list[dict])
+@router.get("/categories", response_model=CategoryListResponse)
 async def get_categories():
     """Get the full category tree from B2B."""
     try:
         categories = await b2b_client.get_categories()
         items = [
-            CategoryDetail(
+            CategoryItem(
                 category_id=str(c.get("id", c.get("category_id", ""))),
                 name=str(c.get("name", "")),
                 parent_id=c.get("parent_id"),
             )
             for c in categories
         ]
-        return items
+        return CategoryListResponse(items=items)
     except B2BClientError as exc:
         raise _b2b_error(502, exc.message)
 

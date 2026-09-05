@@ -83,7 +83,7 @@ async def get_collections(db: AsyncSession = Depends(get_db)):
 
 @router.get("/collections/{collection_id}", response_model=Collection)
 async def get_collection(
-    collection_id: int,
+    collection_id: str,
     db: AsyncSession = Depends(get_db),
 ):
     """Get a single collection with product details enriched from B2B.
