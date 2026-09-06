@@ -4,7 +4,8 @@ Secure identity: user_id comes ONLY from X-User-Id header (JWT proxy).
 Query/body user_id is ALWAYS ignored to prevent IDOR.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Header
+from fastapi import Response, APIRouter, Depends, HTTPException, status, Header
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from typing import List, Optional
@@ -89,8 +90,17 @@ async def get_wishlist(
 # POST /api/v1/wishlist — idempotent
 # =====================================================================
 
+def _has_stock(product_data: dict) -> bool:
+    """Compute availability from B2B SKUs (active_quantity > 0)."""
+    skus = product_data.get("skus", [])
+    if not skus:
+        return bool(product_data.get("has_stock", False))
+    return any((s.get("active_quantity", 0) or 0) > 0 for s in skus if isinstance(s, dict))
+
+
 @router.post("", response_model=WishlistItem, status_code=status.HTTP_201_CREATED)
 async def add_to_wishlist(
+    response: Response,
     item: WishlistItemCreate,
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
@@ -109,7 +119,11 @@ async def add_to_wishlist(
             detail={"code": "PRODUCT_NOT_FOUND", "message": "Product not found"},
         )
 
-    # Check if already in wishlist — idempotent: return existing
+    # Check if already in wishlist — idempotent: return existing.
+    # Restart the transaction so the select sees rows committed by
+    # previous requests (single-connection aiosqlite in tests, and
+    # READ COMMITTED safety in production).
+    await db.rollback()
     existing = await db.execute(
         select(WishlistItemModel).where(
             and_(
@@ -120,24 +134,72 @@ async def add_to_wishlist(
     )
     existing_item = existing.scalar_one_or_none()
     if existing_item:
+        response.status_code = status.HTTP_200_OK
         return WishlistItem(
             wishlist_item_id=existing_item.wishlist_item_id,
             user_id=user_id,
             product_id=existing_item.product_id,
             product_title=product_data.get("title", "Unknown"),
-            main_image_url=product_data.get("main_image_url", ""),
+            main_image_url=product_data.get("cover_image") or "",
             min_price=product_data.get("min_price", 0.0),
-            is_available=product_data.get("is_available", False),
+            is_available=_has_stock(product_data),
             added_at=existing_item.created_at,
         )
 
-    # Insert new item
+    # Re-check inside this transaction: a row committed by another session
+    # may not have been visible to the earlier select.
+    recheck = await db.execute(
+        select(WishlistItemModel).where(
+            and_(
+                WishlistItemModel.user_id == user_id,
+                WishlistItemModel.product_id == item.product_id,
+            )
+        )
+    )
+    existing_item = recheck.scalar_one_or_none()
+    if existing_item:
+        response.status_code = status.HTTP_200_OK
+        return WishlistItem(
+            wishlist_item_id=str(existing_item.wishlist_item_id),
+            user_id=user_id,
+            product_id=existing_item.product_id,
+            product_title=product_data.get("title", "Unknown"),
+            main_image_url=product_data.get("cover_image") or "",
+            min_price=product_data.get("min_price", 0.0),
+            is_available=_has_stock(product_data),
+            added_at=existing_item.created_at,
+        )
+
+    # Insert new item; on unique-violation race, return 200 with existing row
     new_item = WishlistItemModel(
         user_id=user_id,
         product_id=item.product_id,
     )
     db.add(new_item)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        re_select = await db.execute(
+            select(WishlistItemModel).where(
+                and_(
+                    WishlistItemModel.user_id == user_id,
+                    WishlistItemModel.product_id == item.product_id,
+                )
+            )
+        )
+        existing_item = re_select.scalar_one()
+        response.status_code = status.HTTP_200_OK
+        return WishlistItem(
+            wishlist_item_id=str(existing_item.wishlist_item_id),
+            user_id=user_id,
+            product_id=existing_item.product_id,
+            product_title=product_data.get("title", "Unknown"),
+            main_image_url=product_data.get("cover_image") or "",
+            min_price=product_data.get("min_price", 0.0),
+            is_available=_has_stock(product_data),
+            added_at=existing_item.created_at,
+        )
     await db.refresh(new_item)
 
     return WishlistItem(
@@ -145,9 +207,9 @@ async def add_to_wishlist(
         user_id=user_id,
         product_id=new_item.product_id,
         product_title=product_data.get("title", "Unknown"),
-        main_image_url=product_data.get("main_image_url", ""),
+        main_image_url=product_data.get("cover_image") or "",
         min_price=product_data.get("min_price", 0.0),
-        is_available=product_data.get("is_available", False),
+        is_available=_has_stock(product_data),
         added_at=new_item.created_at,
     )
 

@@ -30,19 +30,19 @@ async def get_recommendations(product_id: str, limit: int = 4, db: AsyncSession 
     # Get random products from the same category
     products = await b2b_client.get_products_by_category(
         category_id=category_id,
-        page=1,
-        page_size=limit * 2  # Get more to filter out current product
+        limit=limit * 2,  # Get more to filter out current product
+        offset=0,
     )
 
     recommendations = []
-    for p in products.get("products", []):
-        if p.get("product_id") != product_id and len(recommendations) < limit:
+    for p in products.get("items", []):
+        if p.get("id") != product_id and len(recommendations) < limit:
             recommendations.append(ProductBasic(
-                id=p.get("product_id", ""),
+                id=p.get("id", ""),
                 name=p.get("title", ""),
-                main_image_url=p.get("main_image_url", ""),
+                main_image_url=p.get("cover_image") or "",
                 min_price=p.get("min_price", 0.0),
-                has_stock=p.get("is_available", True)
+                has_stock=True
             ))
 
     # If not enough recommendations, try parent category
@@ -51,23 +51,23 @@ async def get_recommendations(product_id: str, limit: int = 4, db: AsyncSession 
         if parent_category:
             more_products = await b2b_client.get_products_by_category(
                 category_id=parent_category,
-                page=1,
-                page_size=(limit - len(recommendations)) * 2
+                limit=(limit - len(recommendations)) * 2,
+                offset=0,
             )
             
             existing_ids = {p.id for p in recommendations}
-            for p in more_products.get("products", []):
-                if (p.get("product_id") != product_id and 
-                    p.get("product_id") not in existing_ids and
+            for p in more_products.get("items", []):
+                if (p.get("id") != product_id and
+                    p.get("id") not in existing_ids and
                     len(recommendations) < limit):
                     recommendations.append(ProductBasic(
-                        id=p.get("product_id", ""),
+                        id=p.get("id", ""),
                         name=p.get("title", ""),
-                        main_image_url=p.get("main_image_url", ""),
+                        main_image_url=p.get("cover_image") or "",
                         min_price=p.get("min_price", 0.0),
-                        has_stock=p.get("is_available", True)
+                        has_stock=True
                     ))
-                    existing_ids.add(p.get("product_id"))
+                    existing_ids.add(p.get("id"))
 
     return RecommendationList(
         current_product_id=product_id,

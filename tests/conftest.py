@@ -48,6 +48,7 @@ def client(db_session: AsyncSession) -> Generator[TestClient, None, None]:
     """
     async def override_get_db():
         await db_session.rollback()  # reset session state between requests
+        db_session.expire_all()  # drop cached identity map so selects re-read
         yield db_session
 
     app.dependency_overrides[get_db] = override_get_db

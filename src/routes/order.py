@@ -267,7 +267,7 @@ async def get_user_orders(
 
 @router.get("/{order_id}", response_model=Order)
 async def get_order(
-    order_id: int,
+    order_id: str,
     user_id: str = Query(..., description="User ID for IDOR protection"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -300,7 +300,7 @@ async def get_order(
 
 @router.post("/{order_id}/cancel", response_model=Order)
 async def cancel_order(
-    order_id: int,
+    order_id: str,
     user_id: str = Query(..., description="User ID for IDOR protection"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -379,7 +379,7 @@ async def cancel_order(
 
 @router.post("/{order_id}/cancel-retry", response_model=Order)
 async def cancel_order_retry(
-    order_id: int,
+    order_id: str,
     user_id: str = Query(..., description="User ID for IDOR protection"),
     db: AsyncSession = Depends(get_db),
 ):
