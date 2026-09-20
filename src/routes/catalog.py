@@ -1,6 +1,5 @@
 """Catalog routes — product listing with filters, sorting, facets, and pagination."""
 
-import re
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +23,7 @@ from src.schemas import (
     CategoryListResponse,
     BreadcrumbItem,
     BreadcrumbsResponse,
+    ImageRef,
 )
 from src.services.b2b_client import b2b_client, B2BClientError
 
@@ -33,17 +33,19 @@ router = APIRouter()
 # Search validation
 # ---------------------------------------------------------------------------
 SEARCH_MIN_LENGTH: int = 3
-
-# SQL metacharacters that must be escaped so the query doesn't break
-_SEARCH_ESCAPE_RE = re.compile(r"([%_'])")
+SEARCH_MAX_LENGTH: int = 255
 
 
 def _validate_search(query: Optional[str]) -> Optional[str]:
-    """Validate and sanitise the search query.
+    """Validate the search query and pass it through verbatim.
 
-    Raises 400 when the query is shorter than the minimum length.
-    Escapes SQL metacharacters (% _ ') so the downstream B2B layer
-    receives a safe literal string.
+    Per the canonical B2C-2 flow (b2c-catalog-flows.md) B2C only proxies
+    the `search` parameter to B2B; SQL escaping of `%`, `_`, `'` is B2B's
+    responsibility.  B2C keeps only the length guards defined in the same
+    flow (3–255 characters) and must not transform the query text.
+
+    Raises 400 when the query is shorter than the minimum length or
+    longer than the maximum length.
     """
     if query is None or query.strip() == "":
         return None
@@ -57,8 +59,17 @@ def _validate_search(query: Optional[str]) -> Optional[str]:
             },
         )
 
-    # Escape SQL metacharacters
-    return _SEARCH_ESCAPE_RE.sub(r"\\\1", query)
+    if len(query) > SEARCH_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": f"Search query must be at most {SEARCH_MAX_LENGTH} characters",
+            },
+        )
+
+    # Proxy verbatim — no escaping, no normalisation (B2B owns that).
+    return query
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +156,36 @@ def _map_b2b_characteristics(raw_chars) -> dict:
     return result
 
 
+def _map_b2b_images(raw_images, cover: str = "") -> list[dict]:
+    """Normalise B2B images into the B2C ImageRef contract shape.
+
+    B2C openapi.yaml requires images to be ImageRef objects
+    (required: id, url, ordering; optional: alt, is_main).  B2B may return
+    structured ProductImageResponse objects or plain URL strings (legacy);
+    both are mapped to ImageRef dicts so the contract structure is never
+    flattened away in catalog list or product card responses.
+    """
+    images: list[dict] = []
+    for idx, item in enumerate(raw_images or []):
+        if isinstance(item, dict):
+            url = str(item.get("url", ""))
+            if not url:
+                continue
+            ref: dict = {
+                "id": str(item.get("id", idx)),
+                "url": url,
+                "ordering": int(item.get("ordering", idx) or 0),
+            }
+            if item.get("alt") is not None:
+                ref["alt"] = str(item["alt"])
+            if item.get("is_main") is not None:
+                ref["is_main"] = bool(item["is_main"])
+            images.append(ref)
+        elif item:
+            images.append({"id": str(idx), "url": str(item), "ordering": idx})
+    return images
+
+
 def _map_b2b_product(raw: dict) -> dict:
     """Normalise a B2B product dict into ProductDetail shape.
 
@@ -152,12 +193,8 @@ def _map_b2b_product(raw: dict) -> dict:
     (card): id/title/cover_image/min_price per b2b/openapi.yaml.
     """
     cover = raw.get("cover_image") or ""
-    images_raw = raw.get("images", [])
-    if images_raw and isinstance(images_raw[0], dict):
-        image_urls = [i.get("url", "") for i in images_raw if isinstance(i, dict)]
-    else:
-        image_urls = [str(i) for i in images_raw if i]
-    main_image = cover or (image_urls[0] if image_urls else "")
+    images = _map_b2b_images(raw.get("images", []))
+    main_image = cover or (images[0]["url"] if images else "")
 
     skus_raw = raw.get("skus", [])
     has_stock = any(
@@ -172,7 +209,7 @@ def _map_b2b_product(raw: dict) -> dict:
         "min_price": float(raw.get("min_price", 0.0)),
         "has_stock": has_stock,
         "description": raw.get("description", ""),
-        "images": image_urls,
+        "images": images,
         "characteristics": _map_b2b_characteristics(raw.get("characteristics", [])),
         "skus": _map_b2b_skus(skus_raw),
     }
@@ -306,7 +343,7 @@ async def get_products(
                 min_price=p["min_price"],
                 has_stock=p["has_stock"],
                 description=p["description"],
-                images=p["images"],
+                images=[ImageRef(**img) for img in p["images"]],
                 characteristics=p["characteristics"],
                 skus=p["skus"],
             )
@@ -345,7 +382,7 @@ async def get_product(product_id: str, db: AsyncSession = Depends(get_db)):
         min_price=product_data["min_price"],
         has_stock=product_data["has_stock"],
         description=product_data["description"],
-        images=product_data["images"],
+        images=[ImageRef(**img) for img in product_data["images"]],
         characteristics=product_data["characteristics"],
         skus=product_data["skus"],
     )

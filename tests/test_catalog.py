@@ -580,6 +580,75 @@ def test_product_card_returns_full_data_with_skus(client: TestClient):
 
 
 # ======================================================================
+# TEST 6b — ImageRef contract: images[] must keep id/url/ordering
+# ======================================================================
+
+def test_product_card_images_contain_id_url_ordering(client: TestClient):
+    """B2C openapi.yaml ImageRef: images[0] must expose id, url, ordering.
+
+    Structured B2B ProductImageResponse objects must survive mapping —
+    images are never flattened to plain URL strings.
+    """
+    product = {
+        "id": "p1",
+        "title": "Image Contract Product",
+        "cover_image": "http://cover.jpg",
+        "min_price": 100.0,
+        "has_stock": True,
+        "description": "ImageRef contract check",
+        "images": [
+            {"id": "img-1", "url": "http://img1.jpg", "ordering": 0, "alt": "First", "is_main": True},
+            {"id": "img-2", "url": "http://img2.jpg", "ordering": 1},
+        ],
+        "characteristics": [],
+        "skus": [],
+    }
+
+    with patch(CATALOG_B2B) as mock_b2b:
+        mock_b2b.get_product_by_id = AsyncMock(return_value=product)
+
+        resp = client.get("/api/v1/catalog/products/p1")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["images"]) == 2
+
+    img0 = data["images"][0]
+    assert img0["id"] == "img-1"
+    assert img0["url"] == "http://img1.jpg"
+    assert img0["ordering"] == 0
+    assert img0["alt"] == "First"
+    assert img0["is_main"] is True
+
+    img1 = data["images"][1]
+    assert img1["id"] == "img-2"
+    assert img1["url"] == "http://img2.jpg"
+    assert img1["ordering"] == 1
+
+
+def test_catalog_list_images_are_structured_refs(client: TestClient):
+    """Catalog list: legacy plain-URL images from B2B are mapped to ImageRef."""
+    products = [_make_product("p1", "Legacy Image Product", 50.0, image="http://legacy.jpg")]
+    mock_result = _mock_b2b_products_result(products, total=1)
+
+    with patch(CATALOG_B2B) as mock_b2b:
+        mock_b2b.get_products = AsyncMock(return_value=mock_result)
+
+        resp = client.get("/api/v1/catalog/products", params={"limit": 10, "offset": 0})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    images = data["items"][0]["images"]
+    assert len(images) == 1
+
+    img0 = images[0]
+    # ImageRef required fields present even for legacy string input
+    assert img0["id"] == "0"
+    assert img0["url"] == "http://legacy.jpg"
+    assert img0["ordering"] == 0
+
+
+# ======================================================================
 # TEST 7 — cost_price MUST NOT appear in response
 # ======================================================================
 
@@ -843,10 +912,15 @@ def test_short_query_returns_400(client: TestClient):
     assert "3" in data["message"]
 
 
-def test_special_chars_do_not_break_query(client: TestClient):
-    """Special characters (% _ ') are escaped and do not break the query."""
+def test_special_chars_are_proxied_verbatim(client: TestClient):
+    """Per canon B2C-2 B2C proxies `search` verbatim; SQL escaping is B2B's job.
+
+    B2C must not transform %, _, ' — it only guards query length (3–255).
+    """
     products = [_make_product("p1", "iPhone%15", 999.0)]
     mock_result = _mock_b2b_products_result(products, total=1)
+
+    query = "iPhone%15' and 1=1"
 
     with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_products = AsyncMock(return_value=mock_result)
@@ -854,7 +928,7 @@ def test_special_chars_do_not_break_query(client: TestClient):
         # All three SQL metacharacters in one query
         resp = client.get(
             "/api/v1/catalog/products",
-            params={"q": "iPhone%15' and 1=1", "limit": 10, "offset": 0},
+            params={"q": query, "limit": 10, "offset": 0},
         )
 
     assert resp.status_code == 200
@@ -862,10 +936,8 @@ def test_special_chars_do_not_break_query(client: TestClient):
     assert len(data["items"]) == 1
 
     call_kwargs = mock_b2b.get_products.call_args.kwargs
-    search_arg = call_kwargs["search"]
-    # Each special char must be backslash-escaped
-    assert "%" in search_arg or "\\%" in search_arg
-    assert "'" in search_arg or "\\'" in search_arg
+    # Verbatim pass-through: no escaping, no normalisation by B2C
+    assert call_kwargs["search"] == query
 
 
 def test_empty_results_returns_200(client: TestClient):

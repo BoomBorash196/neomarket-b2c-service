@@ -18,6 +18,20 @@ class OrderStatus(str, Enum):
 
 
 # --- Product schemas (from B2B) ---
+class ImageRef(BaseModel):
+    """Product image per B2C openapi.yaml ImageRef contract.
+
+    Required: id, url, ordering.  Optional: alt, is_main.
+    The structured shape must survive B2C mapping — images are never
+    flattened to plain URL strings in catalog list or product card.
+    """
+    id: str
+    url: str
+    ordering: int = 0
+    alt: Optional[str] = None
+    is_main: Optional[bool] = None
+
+
 class ProductBasic(BaseModel):
     """Basic product info from B2B."""
     id: str
@@ -30,7 +44,7 @@ class ProductBasic(BaseModel):
 class ProductDetail(ProductBasic):
     """Full product details."""
     description: str
-    images: List[str]
+    images: List[ImageRef]
     characteristics: dict[str, str]
     skus: List["SKUInfo"]
 
@@ -306,7 +320,7 @@ class ProductDetailSchema(BaseModel):
     min_price: float
     has_stock: bool
     description: str
-    images: List[str]
+    images: List[ImageRef]
     characteristics: dict[str, str]
     skus: List["SKUInfo"]
 
