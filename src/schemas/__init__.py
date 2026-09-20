@@ -19,11 +19,12 @@ class OrderStatus(str, Enum):
 
 # --- Product schemas (from B2B) ---
 class ImageRef(BaseModel):
-    """Product image per B2C openapi.yaml ImageRef contract.
+    """Изображение товара по контракту ImageRef из B2C openapi.yaml.
 
-    Required: id, url, ordering.  Optional: alt, is_main.
-    The structured shape must survive B2C mapping — images are never
-    flattened to plain URL strings in catalog list or product card.
+    Обязательные поля: id, url, ordering. Необязательные: alt, is_main.
+    Структурированный вид должен сохраняться при маппинге в B2C —
+    изображения никогда не сплющиваются в простые строки URL
+    ни в списке каталога, ни в карточке товара.
     """
     id: str
     url: str

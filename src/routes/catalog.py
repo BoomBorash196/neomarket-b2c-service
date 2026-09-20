@@ -37,15 +37,16 @@ SEARCH_MAX_LENGTH: int = 255
 
 
 def _validate_search(query: Optional[str]) -> Optional[str]:
-    """Validate the search query and pass it through verbatim.
+    """Валидирует поисковый запрос и передаёт его вербатим.
 
-    Per the canonical B2C-2 flow (b2c-catalog-flows.md) B2C only proxies
-    the `search` parameter to B2B; SQL escaping of `%`, `_`, `'` is B2B's
-    responsibility.  B2C keeps only the length guards defined in the same
-    flow (3–255 characters) and must not transform the query text.
+    Согласно каноническому сценарию B2C-2 (b2c-catalog-flows.md) B2C лишь
+    проксирует параметр `search` в B2B; экранирование SQL-спецсимволов
+    `%`, `_`, `'` — ответственность B2B. B2C оставляет только проверки
+    длины, заданные тем же сценарием (3–255 символов), и не должен
+    преобразовывать текст запроса.
 
-    Raises 400 when the query is shorter than the minimum length or
-    longer than the maximum length.
+    Вызывает 400, если запрос короче минимальной или длиннее максимальной
+    длины.
     """
     if query is None or query.strip() == "":
         return None
@@ -68,7 +69,7 @@ def _validate_search(query: Optional[str]) -> Optional[str]:
             },
         )
 
-    # Proxy verbatim — no escaping, no normalisation (B2B owns that).
+    # Передаём вербатим — без экранирования и нормализации (это задача B2B).
     return query
 
 
@@ -157,13 +158,14 @@ def _map_b2b_characteristics(raw_chars) -> dict:
 
 
 def _map_b2b_images(raw_images, cover: str = "") -> list[dict]:
-    """Normalise B2B images into the B2C ImageRef contract shape.
+    """Нормализует изображения B2B в формат контракта ImageRef для B2C.
 
-    B2C openapi.yaml requires images to be ImageRef objects
-    (required: id, url, ordering; optional: alt, is_main).  B2B may return
-    structured ProductImageResponse objects or plain URL strings (legacy);
-    both are mapped to ImageRef dicts so the contract structure is never
-    flattened away in catalog list or product card responses.
+    B2C openapi.yaml требует, чтобы images были объектами ImageRef
+    (обязательные: id, url, ordering; необязательные: alt, is_main).
+    B2B может вернуть как структурированные ProductImageResponse, так и
+    простые строки URL (legacy); и то и другое маппится в словари ImageRef,
+    чтобы структура контракта никогда не терялась в списке каталога
+    и в карточке товара.
     """
     images: list[dict] = []
     for idx, item in enumerate(raw_images or []):

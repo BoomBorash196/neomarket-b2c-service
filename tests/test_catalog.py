@@ -584,10 +584,11 @@ def test_product_card_returns_full_data_with_skus(client: TestClient):
 # ======================================================================
 
 def test_product_card_images_contain_id_url_ordering(client: TestClient):
-    """B2C openapi.yaml ImageRef: images[0] must expose id, url, ordering.
+    """ImageRef из B2C openapi.yaml: images[0] должен содержать id, url, ordering.
 
-    Structured B2B ProductImageResponse objects must survive mapping —
-    images are never flattened to plain URL strings.
+    Структурированные объекты ProductImageResponse от B2B должны
+    сохраняться при маппинге — изображения никогда не сплющиваются
+    в простые строки URL.
     """
     product = {
         "id": "p1",
@@ -627,7 +628,7 @@ def test_product_card_images_contain_id_url_ordering(client: TestClient):
 
 
 def test_catalog_list_images_are_structured_refs(client: TestClient):
-    """Catalog list: legacy plain-URL images from B2B are mapped to ImageRef."""
+    """Список каталога: legacy-строки URL от B2B маппятся в ImageRef."""
     products = [_make_product("p1", "Legacy Image Product", 50.0, image="http://legacy.jpg")]
     mock_result = _mock_b2b_products_result(products, total=1)
 
@@ -642,7 +643,7 @@ def test_catalog_list_images_are_structured_refs(client: TestClient):
     assert len(images) == 1
 
     img0 = images[0]
-    # ImageRef required fields present even for legacy string input
+    # Обязательные поля ImageRef присутствуют даже для legacy-строки
     assert img0["id"] == "0"
     assert img0["url"] == "http://legacy.jpg"
     assert img0["ordering"] == 0
@@ -913,9 +914,9 @@ def test_short_query_returns_400(client: TestClient):
 
 
 def test_special_chars_are_proxied_verbatim(client: TestClient):
-    """Per canon B2C-2 B2C proxies `search` verbatim; SQL escaping is B2B's job.
+    """По канону B2C-2 B2C проксирует `search` вербатим; экранирование SQL — задача B2B.
 
-    B2C must not transform %, _, ' — it only guards query length (3–255).
+    B2C не должен преобразовывать %, _, ' — он проверяет только длину запроса (3–255).
     """
     products = [_make_product("p1", "iPhone%15", 999.0)]
     mock_result = _mock_b2b_products_result(products, total=1)
@@ -925,7 +926,7 @@ def test_special_chars_are_proxied_verbatim(client: TestClient):
     with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_products = AsyncMock(return_value=mock_result)
 
-        # All three SQL metacharacters in one query
+        # Все три SQL-спецсимвола в одном запросе
         resp = client.get(
             "/api/v1/catalog/products",
             params={"q": query, "limit": 10, "offset": 0},
@@ -936,7 +937,7 @@ def test_special_chars_are_proxied_verbatim(client: TestClient):
     assert len(data["items"]) == 1
 
     call_kwargs = mock_b2b.get_products.call_args.kwargs
-    # Verbatim pass-through: no escaping, no normalisation by B2C
+    # Вербатим-передача: без экранирования и нормализации со стороны B2C
     assert call_kwargs["search"] == query
 
 
