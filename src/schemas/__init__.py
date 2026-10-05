@@ -313,22 +313,45 @@ class FacetsResponse(BaseModel):
 
 
 # --- Catalog list / pagination schemas ---
-class ProductDetailSchema(BaseModel):
-    """B2C-safe product detail returned in catalog listings."""
+class CatalogSku(BaseModel):
+    """Storefront SKU — B2C ``CatalogSku`` (openapi.yaml:1084).
+
+    Note: the B2B public SKU schema has no ``color``/``size`` columns; variant
+    attributes live in ``characteristics`` and are exposed as ``attributes``.
+    """
+    id: str
+    name: Optional[str] = None
+    sku_code: Optional[str] = None
+    price: int
+    old_price: Optional[int] = None
+    available_quantity: int
+    attributes: dict[str, str] = {}
+    images: List[ImageRef] = []
+
+
+class CatalogProductCard(BaseModel):
+    """Storefront product card — B2C ``CatalogProductCard`` (openapi.yaml:1038).
+
+    Required by spec: ``id``, ``name``, ``min_price``, ``has_stock``, ``images``.
+    """
     id: str
     name: str
-    main_image_url: str
-    min_price: float
+    slug: Optional[str] = None
+    min_price: int
     has_stock: bool
+    images: List[ImageRef] = []
+
+
+class CatalogProductDetail(CatalogProductCard):
+    """Full storefront card — B2C ``CatalogProductDetail`` (card + description, skus)."""
     description: str
-    images: List[ImageRef]
-    characteristics: dict[str, str]
-    skus: List["SKUInfo"]
+    attributes: dict[str, str] = {}
+    skus: List[CatalogSku] = []
 
 
 class PaginatedCatalogProducts(BaseModel):
     """Paginated catalog product list per OpenAPI spec."""
-    items: List[ProductDetailSchema]
+    items: List[CatalogProductCard]
     total_count: int
     limit: int
     offset: int

@@ -1,10 +1,15 @@
 """Main FastAPI application."""
 
 from fastapi import FastAPI, Depends, Request, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
-from starlette.status import HTTP_409_CONFLICT, HTTP_500_INTERNAL_SERVER_ERROR
+from starlette.status import (
+    HTTP_409_CONFLICT,
+    HTTP_422_UNPROCESSABLE_ENTITY,
+    HTTP_500_INTERNAL_SERVER_ERROR,
+)
 
 from src.config import settings
 from src.database import engine, Base
@@ -35,11 +40,31 @@ def create_app() -> FastAPI:
         if 'unique' in error_msg.lower() or 'duplicate' in error_msg.lower():
             return JSONResponse(
                 status_code=HTTP_409_CONFLICT,
-                content={"detail": "Resource already exists", "error": "DUPLICATE_ENTRY"}
+                content={"code": "DUPLICATE_ENTRY", "message": "Resource already exists"},
             )
         return JSONResponse(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"detail": "Database integrity error", "error": "DATABASE_INTEGRITY_ERROR"}
+            content={"code": "DATABASE_INTEGRITY_ERROR", "message": "Database integrity error"},
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(request: Request, exc: RequestValidationError):
+        """Return framework validation errors in the OpenAPI Error schema.
+
+        FastAPI's default body is ``{"detail": [...]}``, which does not match the
+        B2C contract — every 4xx must be ``{"code": ..., "message": ...}``.
+        """
+        problems = [
+            f"{'.'.join(str(p) for p in err.get('loc', ())[1:])}: {err.get('msg', 'invalid')}"
+            for err in exc.errors()
+        ]
+        return JSONResponse(
+            status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+            content={
+                "code": "VALIDATION_ERROR",
+                "message": "Invalid request parameters",
+                "details": {"fields": problems},
+            },
         )
 
     @app.exception_handler(HTTPException)
