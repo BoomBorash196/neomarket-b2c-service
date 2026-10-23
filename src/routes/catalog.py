@@ -7,6 +7,7 @@ is built from the published B2B contract (``b2b/openapi.yaml``, tag
 active_quantity > 0) is applied by B2B — B2C never filters on those fields.
 """
 
+import uuid
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -39,6 +40,12 @@ from src.services.facet_service import FacetSelection, get_facets as compute_fac
 
 router = APIRouter()
 
+# Compatibility alias for the task's ``GET /api/v1/products?search=`` form. The
+# published B2C contract exposes the same operation as
+# ``GET /api/v1/catalog/products`` with the ``q`` parameter, so the alias stays
+# out of the generated OpenAPI document and only mirrors the canonical handler.
+alias_router = APIRouter()
+
 # ---------------------------------------------------------------------------
 # Search validation
 # ---------------------------------------------------------------------------
@@ -47,18 +54,19 @@ SEARCH_MAX_LENGTH: int = 200
 
 
 def _validate_search(query: Optional[str]) -> Optional[str]:
-    """Validate the `q` parameter.
+    """Validate the search parameter and return it unchanged.
 
-    Length rules mirror the B2B `search` param (minLength 3) and the B2C `q`
-    param (maxLength 200). The value itself is passed through untouched: it is a
-    query-string parameter that the receiving service is responsible for
-    encoding/escaping, and pre-escaping here corrupts the user's input.
+    Length rules mirror the B2B ``search`` param (minLength 3) and the B2C ``q``
+    param (maxLength 200). The canon flow (``b2c-catalog-flows.md#b2c-2-search``)
+    puts matching on B2B: B2C validates the length only and forwards the value
+    exactly as received. No escaping, trimming or LIKE-pattern rewriting happens
+    here — ``%``, ``_`` and quotes are B2B's business, and pre-escaping them
+    corrupts the user's input.
     """
     if query is None or query.strip() == "":
         return None
 
-    stripped = query.strip()
-    if len(stripped) < SEARCH_MIN_LENGTH:
+    if len(query.strip()) < SEARCH_MIN_LENGTH:
         raise HTTPException(
             status_code=400,
             detail={
@@ -66,7 +74,7 @@ def _validate_search(query: Optional[str]) -> Optional[str]:
                 "message": f"Search query must be at least {SEARCH_MIN_LENGTH} characters",
             },
         )
-    if len(stripped) > SEARCH_MAX_LENGTH:
+    if len(query) > SEARCH_MAX_LENGTH:
         raise HTTPException(
             status_code=400,
             detail={
@@ -74,7 +82,7 @@ def _validate_search(query: Optional[str]) -> Optional[str]:
                 "message": f"Search query must be at most {SEARCH_MAX_LENGTH} characters",
             },
         )
-    return stripped
+    return query
 
 
 # ---------------------------------------------------------------------------
@@ -171,15 +179,17 @@ def _cover_images(product: B2BProductShort) -> List[ImageRef]:
     """Card images for a listing row.
 
     ``ProductPublicShortResponse`` carries a single ``cover_image`` URL string
-    and no image objects, so the card gets that one image. ``ImageRef.id`` is
-    required by the B2C contract and B2B supplies no id for the cover, so the
-    product id is used — it is stable and unique within the card.
+    and no image objects, while the B2C ``ImageRef`` contract requires ``id``,
+    ``url`` and ``ordering`` and types ``id`` as a UUID. B2B supplies no id for
+    the cover, so a stable UUIDv5 is derived from the product id and the cover
+    URL: it keeps the response schema-valid and identical across requests
+    without inventing random identifiers.
     """
     if not product.cover_image:
         return []
     return [
         ImageRef(
-            id=f"{product.id}-cover",
+            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{product.id}:{product.cover_image}")),
             url=product.cover_image,
             ordering=0,
             is_main=True,
@@ -291,6 +301,12 @@ async def get_products(
     brand: Optional[str] = Query(None, alias="filter[brand]", description="Brand filter"),
     in_stock: Optional[str] = Query(None, alias="filter[in_stock]", description="in_stock=true/false"),
     q: Optional[str] = Query(None, max_length=SEARCH_MAX_LENGTH, description="Search by product name / description"),
+    search: Optional[str] = Query(
+        None,
+        max_length=SEARCH_MAX_LENGTH,
+        include_in_schema=False,
+        description="Alias for q",
+    ),
     sort: Optional[str] = Query(None, description=f"Sort: {', '.join(ALLOWED_SORT_VALUES)}"),
     limit: int = Query(20, ge=1, le=100, description="Items per page (1–100)"),
     offset: int = Query(0, ge=0, description="Number of items to skip"),
@@ -298,12 +314,18 @@ async def get_products(
 ):
     """Get products with filtering, sorting, and pagination.
 
+    Search follows the canon flow ``b2c-catalog-flows.md#b2c-2-search``: the raw
+    ``q``/``search`` value is forwarded to B2B as ``search``, which matches
+    ``title`` and ``description`` and applies the same visibility rules as the
+    rest of the catalogue (MODERATED, not deleted, in stock). B2C validates only
+    the length: shorter than 3 characters → 400, longer than 200 → 400.
+
     B2B call: ``GET /public/products`` with the spec's own parameter names —
     ``category_id``, ``search``, ``min_price``, ``max_price``, ``seller_id``,
     ``filters[...]``, ``sort``, ``limit``, ``offset``.
     """
     in_stock_bool = _parse_in_stock(in_stock)
-    safe_search = _validate_search(q)
+    search_query = _validate_search(q if q is not None else search)
     b2b_sort = _b2b_sort(sort)
     filters = _b2b_filters(brand, _extract_attributes(request))
 
@@ -315,7 +337,7 @@ async def get_products(
     page = await _b2b_call(
         b2b_client.list_public_products(
             category_id=category_id,
-            search=safe_search,
+            search=search_query,
             min_price=price_min,
             max_price=price_max,
             seller_id=seller_id,
@@ -367,6 +389,12 @@ async def get_facets(
     brand: Optional[str] = Query(None, alias="filter[brand]", description="Brand filter"),
     in_stock: Optional[str] = Query(None, alias="filter[in_stock]", description="in_stock=true/false"),
     q: Optional[str] = Query(None, max_length=SEARCH_MAX_LENGTH, description="Restrict counts to this query"),
+    search: Optional[str] = Query(
+        None,
+        max_length=SEARCH_MAX_LENGTH,
+        include_in_schema=False,
+        description="Alias for q",
+    ),
     sort: Optional[str] = Query(None, description=f"Sort: {', '.join(ALLOWED_SORT_VALUES)}"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -378,7 +406,7 @@ async def get_facets(
     characteristics) — see ``docs/adr-001-catalog-facets.md``.
     """
     in_stock_bool = _parse_in_stock(in_stock)
-    safe_search = _validate_search(q)
+    search_query = _validate_search(q if q is not None else search)
     b2b_sort = _b2b_sort(sort)
 
     selection = FacetSelection(
@@ -386,7 +414,7 @@ async def get_facets(
         price_min=price_min,
         price_max=price_max,
         seller_id=seller_id,
-        search=safe_search,
+        search=search_query,
         in_stock=in_stock_bool,
         sort=b2b_sort,
         attributes=_sorted_attribute_items(_b2b_filters(brand, _extract_attributes(request))),
@@ -736,3 +764,16 @@ async def get_category_filters(category_id: str, db: AsyncSession = Depends(get_
         FilterOption(name=fb.name, label=fb.label, values=fb.values) for fb in facets
     ]
     return ProductFilters(category_id=category_id, filters=filters_list)
+
+
+# ---------------------------------------------------------------------------
+# Compatibility alias: GET /api/v1/products (same handler as
+# /api/v1/catalog/products, hidden from the generated OpenAPI document)
+# ---------------------------------------------------------------------------
+alias_router.add_api_route(
+    "/products",
+    get_products,
+    methods=["GET"],
+    response_model=PaginatedCatalogProducts,
+    include_in_schema=False,
+)

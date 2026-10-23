@@ -95,6 +95,9 @@ def create_app() -> FastAPI:
     app.include_router(wishlist.router, prefix="/api/v1/wishlist", tags=["Wishlist"])
     app.include_router(subscriptions.router, prefix="/api/v1/cart", tags=["Cart"])
     app.include_router(catalog.router, prefix="/api/v1/catalog", tags=["Catalog"])
+    # Undocumented alias for `GET /api/v1/products?search=`; the canonical,
+    # OpenAPI-documented path is `/api/v1/catalog/products?q=`.
+    app.include_router(catalog.alias_router, prefix="/api/v1", tags=["Catalog"])
     app.include_router(home.router, prefix="/api/v1/home", tags=["Home"])
     app.include_router(recommendations.router, prefix="/api/v1/recommendations", tags=["Recommendations"])
 
