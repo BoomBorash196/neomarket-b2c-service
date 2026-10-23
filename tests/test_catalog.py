@@ -1,4 +1,4 @@
-﻿"""Tests for catalog endpoints — US-CAT-01: каталог с фильтрами и фасетами.
+﻿"""Tests for catalog endpoints — US-CAT-01 (filters/facets) and US-CAT-02 (search).
 
 Every B2B fixture in this file is a literal transcription of the published B2B
 contract (``b2b/openapi.yaml``, tag ``Public Catalog``):
@@ -15,12 +15,17 @@ Covers:
   - facets_return_counts_per_filter_value     (facets)
   - invalid_sort_returns_400                  (bad sort)
   - b2b_unavailable_returns_502               (B2B down → 502)
+  - search_returns_matching_products          (US-CAT-02 happy path)
+  - short_query_returns_400                   (US-CAT-02 min length)
+  - special_chars_do_not_break_query          (US-CAT-02 raw pass-through)
+  - empty_results_returns_200                 (US-CAT-02 no matches)
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from contextlib import ExitStack, contextmanager
 from unittest.mock import AsyncMock, patch
 
@@ -278,9 +283,13 @@ def test_catalog_maps_short_response_fields(client: TestClient):
     assert card["has_stock"] is True                 # B2B public list ⇒ in stock
     assert card["images"][0]["url"] == "https://cdn/img.jpg"  # from `cover_image`
     assert card["images"][0]["is_main"] is True
-    # ImageRef requires `id`; B2B gives no id for the cover, so it is derived
-    assert card["images"][0]["id"] == "p1-cover"
     assert card["images"][0]["ordering"] == 0
+    # ImageRef.id is `format: uuid`; B2B gives no id for the cover, so a stable
+    # UUIDv5 is derived (deterministic, not random).
+    assert uuid.UUID(card["images"][0]["id"])
+    assert card["images"][0]["id"] == str(
+        uuid.uuid5(uuid.NAMESPACE_URL, "p1:https://cdn/img.jpg")
+    )
 
 
 def test_catalog_card_without_cover_image(client: TestClient):
@@ -364,6 +373,68 @@ def test_catalog_search_filter(client: TestClient):
 
     assert resp.status_code == 200
     assert mock_b2b.list_public_products.call_args.kwargs["search"] == "mouse"
+
+
+# ======================================================================
+# US-CAT-02 — text search (canon flow b2c-catalog-flows.md#b2c-2-search)
+# ======================================================================
+def test_search_returns_matching_products(client: TestClient):
+    """Happy path: B2B matches title/description and only matches are returned.
+
+    Matching itself belongs to B2B (the canon flow puts it there), so the mock
+    plays B2B: out of three products it selects the one matching by title and
+    the one matching by description. B2C must forward the raw term, keep the
+    US-CAT-01 filters/sort/pagination in the same request, and pass the B2B
+    page through without dropping or reshaping the cards.
+    """
+    title_match = _b2b_product_short("p1", "Apple iPhone 15", 7999000, cover_image="https://cdn/iphone.jpg")
+    description_match = _b2b_product_short("p2", "Чехол для iPhone 15", 199000)
+    unrelated = _b2b_product_short("p3", "Samsung Galaxy S24", 6999000)
+
+    with fake_b2b() as mock_b2b:
+        mock_b2b.list_public_products = AsyncMock(
+            return_value=_parse([title_match, description_match], limit=5, offset=0, total=2)
+        )
+
+        resp = client.get(
+            "/api/v1/catalog/products",
+            params={
+                "q": "iPhone 15",
+                "filter[category_id]": "11111111-1111-1111-1111-111111111111",
+                "filter[price_max]": 10000000,
+                "sort": "price_asc",
+                "limit": 5,
+                "offset": 0,
+            },
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_count"] == 2
+    assert [item["id"] for item in data["items"]] == ["p1", "p2"]
+    assert [item["name"] for item in data["items"]] == ["Apple iPhone 15", "Чехол для iPhone 15"]
+    assert unrelated["id"] not in [item["id"] for item in data["items"]]
+
+    kwargs = mock_b2b.list_public_products.call_args.kwargs
+    assert kwargs["search"] == "iPhone 15"
+    # US-CAT-01 parameters keep working together with the search term
+    assert kwargs["category_id"] == "11111111-1111-1111-1111-111111111111"
+    assert kwargs["max_price"] == 10000000
+    assert kwargs["sort"] == "price_asc"
+    assert kwargs["limit"] == 5
+    assert kwargs["offset"] == 0
+
+
+def test_search_param_alias_and_products_path(client: TestClient):
+    """`/api/v1/products?search=` from the task maps onto the canonical handler."""
+    with fake_b2b() as mock_b2b:
+        mock_b2b.list_public_products = AsyncMock(return_value=_parse([]))
+
+        resp = client.get("/api/v1/products", params={"search": "кофе"})
+
+    assert resp.status_code == 200
+    assert resp.json()["items"] == []
+    assert mock_b2b.list_public_products.call_args.kwargs["search"] == "кофе"
 
 
 def test_catalog_in_stock_true_does_not_filter(client: TestClient):
@@ -895,26 +966,71 @@ def test_error_responses_use_code_message(client: TestClient):
         assert "detail" not in body
 
 
-def test_short_search_query_returns_400(client: TestClient):
-    """q shorter than the B2B minLength(3) → 400 SHORT_SEARCH_QUERY."""
-    resp = client.get("/api/v1/catalog/products", params={"q": "ab"})
+def test_short_query_returns_400(client: TestClient):
+    """`q`/`search` shorter than the B2B minLength(3) → 400 SHORT_SEARCH_QUERY."""
+    for param in ("q", "search"):
+        for short in ("ab", "  a  ", "ok"):
+            resp = client.get("/api/v1/catalog/products", params={param: short})
 
-    assert resp.status_code == 400
-    assert resp.json()["code"] == "SHORT_SEARCH_QUERY"
+            assert resp.status_code == 400, (param, short)
+            body = resp.json()
+            assert body["code"] == "SHORT_SEARCH_QUERY"
+            assert body["message"] == "Search query must be at least 3 characters"
+            assert "detail" not in body
 
 
-def test_search_query_passes_through_unescaped(client: TestClient):
-    """The query is forwarded as typed — B2C does not rewrite the user's input."""
+def test_search_query_too_long_returns_400(client: TestClient):
+    """Longer than the B2C `q` maxLength(200) is rejected, in Error format."""
+    resp = client.get("/api/v1/catalog/products", params={"q": "a" * 201})
+
+    # The published contract caps `q` at 200, so FastAPI rejects it before the
+    # handler runs; the global handler renders it in the {code, message} format.
+    assert resp.status_code in (400, 422)
+    body = resp.json()
+    assert body["code"] in ("SEARCH_QUERY_TOO_LONG", "VALIDATION_ERROR")
+    assert "detail" not in body
+
+
+def test_special_chars_do_not_break_query(client: TestClient):
+    """SQL/LIKE metacharacters and quotes reach B2B byte-for-byte, without 500.
+
+    ``%``, ``_`` and ``'`` are part of the user's search phrase. B2C performs no
+    escaping, trimming or pattern rewriting — the canon flow leaves matching to
+    B2B — so the exact string must arrive in the ``search`` parameter.
+    """
+    terms = [
+        "iPhone%15",
+        "кофе'",
+        "50%_off'",
+        "100% хлопок",
+        "O'Brien",
+    ]
+
+    for term in terms:
+        with fake_b2b() as mock_b2b:
+            mock_b2b.list_public_products = AsyncMock(return_value=_parse([]))
+
+            resp = client.get("/api/v1/catalog/products", params={"q": term})
+
+            assert resp.status_code == 200, term
+            assert resp.json()["items"] == []
+            assert mock_b2b.list_public_products.call_args.kwargs["search"] == term
+
+
+def test_empty_results_returns_200(client: TestClient):
+    """No matches is a normal page: 200, empty list, total_count 0, same paging."""
     with fake_b2b() as mock_b2b:
-        mock_b2b.list_public_products = AsyncMock(return_value=_parse([]))
+        mock_b2b.list_public_products = AsyncMock(
+            return_value=_parse([], limit=10, offset=0, total=0)
+        )
 
         resp = client.get(
             "/api/v1/catalog/products",
-            params={"q": "iPhone%15' and 1=1"},
+            params={"q": "несуществующий-товар", "limit": 10, "offset": 0},
         )
 
     assert resp.status_code == 200
-    assert mock_b2b.list_public_products.call_args.kwargs["search"] == "iPhone%15' and 1=1"
+    assert resp.json() == {"items": [], "total_count": 0, "limit": 10, "offset": 0}
 
 
 # ======================================================================
@@ -944,6 +1060,16 @@ def test_product_detail_maps_public_response(client: TestClient):
     assert data["has_stock"] is True
     assert data["min_price"] == 4999
     assert len(data["images"]) == 2
+    # List and detail share the same contract structure: ImageRef, not bare URLs
+    assert data["images"][0] == {
+        "id": "img-1",
+        "url": "https://cdn/main.jpg",
+        "ordering": 0,
+        "is_main": True,
+        "alt": None,
+    }
+    assert data["images"][1]["ordering"] == 1
+    assert data["images"][1]["is_main"] is False
     assert data["images"][0]["is_main"] is True
     assert data["attributes"]["Бренд"] == "Acme"
 
