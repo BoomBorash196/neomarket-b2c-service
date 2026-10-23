@@ -318,13 +318,22 @@ class CatalogSku(BaseModel):
 
     Note: the B2B public SKU schema has no ``color``/``size`` columns; variant
     attributes live in ``characteristics`` and are exposed as ``attributes``.
+
+    ``in_stock`` and ``discount`` are additive fields required by the canon flow
+    ``b2c-catalog-flows.md#b2c-3-product-card``: a SKU with no active stock is
+    still listed, but with ``in_stock=false``; ``discount > 0`` (absolute amount
+    in kopecks, exactly as B2B reports it) tells the front end to show the
+    crossed-out price. ``old_price`` carries the same fact for readers that only
+    follow the published ``CatalogSku`` schema.
     """
     id: str
     name: Optional[str] = None
     sku_code: Optional[str] = None
     price: int
     old_price: Optional[int] = None
+    discount: int = 0
     available_quantity: int
+    in_stock: bool = True
     attributes: dict[str, str] = {}
     images: List[ImageRef] = []
 

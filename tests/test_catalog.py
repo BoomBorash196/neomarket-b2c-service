@@ -19,6 +19,10 @@ Covers:
   - short_query_returns_400                   (US-CAT-02 min length)
   - special_chars_do_not_break_query          (US-CAT-02 raw pass-through)
   - empty_results_returns_200                 (US-CAT-02 no matches)
+  - product_card_returns_full_data_with_skus  (US-CAT-03 happy path)
+  - sku_without_stock_is_shown_as_unavailable (US-CAT-03 SKU availability)
+  - cost_price_absent_in_response             (US-CAT-03 no seller fields)
+  - blocked_product_returns_404               (US-CAT-03 hidden product)
 """
 
 from __future__ import annotations
@@ -946,6 +950,40 @@ def test_b2b_invalid_status_returns_502(client: TestClient):
     assert "ProductStatus" in resp.json()["message"]
 
 
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(
+            lambda p: p["skus"][0].__setitem__("sku_id", p["skus"][0].pop("id")),
+            id="sku-id-under-invented-name",
+        ),
+        pytest.param(
+            lambda p: p["skus"][0].pop("discount"),
+            id="sku-without-required-discount",
+        ),
+        pytest.param(
+            lambda p: p.__setitem__("characteristics", {"Бренд": "Acme"}),
+            id="characteristics-as-dict",
+        ),
+    ],
+)
+def test_card_rejects_b2b_payload_that_does_not_match_the_spec(client: TestClient, mutate):
+    """The card parser reads only published B2B names — no silent defaults.
+
+    The previous implementation renamed ``sku_id``/``stock_quantity`` and
+    defaulted missing values, so a real B2B response produced empty ids and zero
+    prices. Here every deviation is an upstream protocol fault (502).
+    """
+    product = _b2b_product("p1", "Legacy", skus=[_b2b_sku("s1", "p1", 1000)])
+    mutate(product)
+
+    with patch.object(b2b_client, "_request", AsyncMock(return_value=product)):
+        resp = client.get("/api/v1/catalog/products/p1")
+
+    assert resp.status_code == 502
+    assert resp.json()["code"] == "B2B_UNAVAILABLE"
+
+
 # ======================================================================
 # TEST 5 — error format (contract-wide {code, message})
 # ======================================================================
@@ -1036,13 +1074,19 @@ def test_empty_results_returns_200(client: TestClient):
 # ======================================================================
 # TEST 6 — product card (US-CAT-03) against the real B2B schema
 # ======================================================================
-def test_product_detail_maps_public_response(client: TestClient):
-    """Card is built from ProductPublicResponse / SKUPublicResponse field names."""
+def test_product_card_returns_full_data_with_skus(client: TestClient):
+    """Happy path: photos, description and SKUs with prices/availability.
+
+    The fixture is ``ProductPublicResponse`` exactly as published in
+    ``b2b/openapi.yaml``: characteristics are an array of ``{id, name, value}``,
+    not a dict; SKUs are ``SKUPublicResponse`` with ``active_quantity`` /
+    ``article``. A card built from invented field names fails here.
+    """
     product = _b2b_product(
         "p1",
         "Wireless Headphones",
         skus=[
-            _b2b_sku("s1-black", "p1", 4999, active_quantity=10),
+            _b2b_sku("s1-black", "p1", 4999, active_quantity=10, discount=500),
             _b2b_sku("s2-white", "p1", 5299, active_quantity=0),
         ],
     )
@@ -1058,7 +1102,7 @@ def test_product_detail_maps_public_response(client: TestClient):
     assert data["name"] == "Wireless Headphones"
     assert data["description"] == "Описание Wireless Headphones"
     assert data["has_stock"] is True
-    assert data["min_price"] == 4999
+    assert data["min_price"] == 4499   # discounted price of the in-stock SKU
     assert len(data["images"]) == 2
     # List and detail share the same contract structure: ImageRef, not bare URLs
     assert data["images"][0] == {
@@ -1070,17 +1114,129 @@ def test_product_detail_maps_public_response(client: TestClient):
     }
     assert data["images"][1]["ordering"] == 1
     assert data["images"][1]["is_main"] is False
-    assert data["images"][0]["is_main"] is True
-    assert data["attributes"]["Бренд"] == "Acme"
+
+    # B2B returns characteristics as an array → B2C `attributes` is a dict
+    assert data["attributes"] == {"Бренд": "Acme"}
 
     assert len(data["skus"]) == 2
     sku = next(s for s in data["skus"] if s["id"] == "s1-black")
-    assert sku["available_quantity"] == 10   # from active_quantity
-    assert sku["price"] == 4999
     assert sku["sku_code"] == "ART-1"        # from article
+    assert sku["attributes"] == {}           # empty list stays a dict
+    assert sku["available_quantity"] == 10   # from active_quantity (stock - reserved)
+    assert sku["in_stock"] is True
+    assert sku["price"] == 4499              # price - discount
+    assert sku["old_price"] == 4999          # discount > 0 → crossed-out price
+    assert sku["discount"] == 500
 
     out_of_stock = next(s for s in data["skus"] if s["id"] == "s2-white")
     assert out_of_stock["available_quantity"] == 0
+    assert out_of_stock["old_price"] is None
+
+
+def test_product_card_available_via_products_alias(client: TestClient):
+    """`GET /api/v1/products/{id}` from the task hits the same card handler."""
+    product = _b2b_product("p1", "Alias Card", skus=[_b2b_sku("s1", "p1", 1000)])
+
+    with fake_b2b() as mock_b2b:
+        mock_b2b.get_public_product = AsyncMock(return_value=_detail(product))
+
+        resp = client.get("/api/v1/products/p1")
+
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "p1"
+    assert resp.json()["name"] == "Alias Card"
+
+
+def test_sku_without_stock_is_shown_as_unavailable(client: TestClient):
+    """A SKU with no active stock is still in the list, but marked unavailable."""
+    product = _b2b_product(
+        "p1",
+        "Mixed Availability",
+        skus=[
+            _b2b_sku("s1-available", "p1", 1000, active_quantity=3),
+            _b2b_sku("s2-sold-out", "p1", 1200, active_quantity=0),
+        ],
+    )
+
+    with fake_b2b() as mock_b2b:
+        mock_b2b.get_public_product = AsyncMock(return_value=_detail(product))
+
+        resp = client.get("/api/v1/catalog/products/p1")
+
+    assert resp.status_code == 200
+    skus = resp.json()["skus"]
+    assert [s["id"] for s in skus] == ["s1-available", "s2-sold-out"]
+    sold_out = next(s for s in skus if s["id"] == "s2-sold-out")
+    assert sold_out["available_quantity"] == 0
+    assert sold_out["in_stock"] is False
+    assert next(s for s in skus if s["id"] == "s1-available")["in_stock"] is True
+
+
+def test_product_card_characteristics_are_a_dict_in_response(client: TestClient):
+    """B2B characteristics (array) → B2C `attributes` (object); SKU too."""
+    product = _b2b_product(
+        "p1",
+        "With Variants",
+        characteristics=[
+            {"id": "ch-1", "name": "Бренд", "value": "Acme"},
+            {"id": "ch-2", "name": "Цвет", "value": "чёрный"},
+        ],
+        skus=[
+            {
+                **_b2b_sku("s1", "p1", 1000),
+                "characteristics": [
+                    {"id": "ch-3", "name": "Размер", "value": "M"},
+                ],
+            }
+        ],
+    )
+
+    with fake_b2b() as mock_b2b:
+        mock_b2b.get_public_product = AsyncMock(return_value=_detail(product))
+
+        resp = client.get("/api/v1/catalog/products/p1")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["attributes"] == {"Бренд": "Acme", "Цвет": "чёрный"}
+    assert body["skus"][0]["attributes"] == {"Размер": "M"}
+
+
+def test_cost_price_absent_in_response(client: TestClient):
+    """Seller-internal fields never reach the buyer, even if B2B sends them."""
+    product = _b2b_product("p1", "Leaky", skus=[_b2b_sku("s1", "p1", 1000)])
+    # Simulate a B2B implementation leaking seller internals.
+    product["cost_price"] = 250
+    product["reserved_quantity"] = 1
+    product["skus"][0]["cost_price"] = 250
+    product["skus"][0]["reserved_quantity"] = 3
+
+    with fake_b2b() as mock_b2b:
+        mock_b2b.get_public_product = AsyncMock(return_value=_detail(product))
+
+        response = client.get("/api/v1/catalog/products/p1")
+
+    assert response.status_code == 200
+    assert "cost_price" not in response.json()["skus"][0]
+    assert "cost_price" not in response.json()
+    assert "reserved_quantity" not in json.dumps(response.json())
+
+
+def test_blocked_product_returns_404(client: TestClient):
+    """Blocked products are indistinguishable from missing ones (404)."""
+    for status in ("BLOCKED", "HARD_BLOCKED", "CREATED", "ON_MODERATION"):
+        product = _b2b_product("p1", "Hidden", skus=[_b2b_sku("s1", "p1", 1000)])
+        product["status"] = status
+
+        with fake_b2b() as mock_b2b:
+            mock_b2b.get_public_product = AsyncMock(return_value=_detail(product))
+
+            resp = client.get("/api/v1/catalog/products/p1")
+
+        assert resp.status_code == 404, status
+        body = resp.json()
+        assert body["code"] == "PRODUCT_NOT_FOUND"
+        assert "detail" not in body
 
 
 def test_product_detail_min_price_uses_discounted_price(client: TestClient):
@@ -1103,26 +1259,6 @@ def _detail(product: dict):
     from src.services.b2b_public_catalog import parse_product
 
     return parse_product(product)
-
-
-def test_product_detail_never_leaks_seller_fields(client: TestClient):
-    """Even if B2B adds internal fields, the B2C card exposes only its own schema."""
-    product = _b2b_product("p1", "Leaky", skus=[_b2b_sku("s1", "p1", 1000)])
-    # Simulate a B2B implementation leaking seller internals.
-    product["cost_price"] = 250
-    product["skus"][0]["cost_price"] = 250
-    product["skus"][0]["reserved_quantity"] = 3
-
-    with fake_b2b() as mock_b2b:
-        mock_b2b.get_public_product = AsyncMock(return_value=_detail(product))
-
-        resp = client.get("/api/v1/catalog/products/p1")
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "cost_price" not in body
-    assert "reserved_quantity" not in json.dumps(body)
-    assert "cost_price" not in body["skus"][0]
 
 
 def test_product_not_found_returns_404(client: TestClient):

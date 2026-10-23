@@ -222,7 +222,9 @@ def _detail_from_product(product: B2BProduct) -> CatalogProductDetail:
             sku_code=sku.article,
             price=sku.final_price,
             old_price=sku.price if sku.discount > 0 else None,
+            discount=sku.discount,
             available_quantity=sku.active_quantity,
+            in_stock=sku.in_stock,
             attributes=_attributes_of(sku.characteristics),
             images=[
                 ImageRef(url=i.url, id=i.id, ordering=i.ordering)
@@ -256,6 +258,14 @@ def _b2b_error(status_code: int, message: str) -> HTTPException:
     return HTTPException(
         status_code=status_code,
         detail={"code": "B2B_UNAVAILABLE", "message": message},
+    )
+
+
+def _product_not_found() -> HTTPException:
+    """404 for products the buyer must not see (missing, blocked, deleted)."""
+    return HTTPException(
+        status_code=404,
+        detail={"code": "PRODUCT_NOT_FOUND", "message": "Product not found"},
     )
 
 
@@ -359,19 +369,32 @@ async def get_products(
 # ---------------------------------------------------------------------------
 # GET /api/v1/catalog/products/{product_id}
 # ---------------------------------------------------------------------------
+# Products B2B still returns but the storefront must not show: only MODERATED
+# products are visible to buyers (the public B2B endpoint already hides them, so
+# this is a defensive check that keeps blocked/deleted products at 404 even if
+# the upstream filter regresses).
+HIDDEN_PRODUCT_STATUSES: frozenset[str] = frozenset(
+    {"CREATED", "ON_MODERATION", "BLOCKED", "HARD_BLOCKED"}
+)
+
+
 @router.get("/products/{product_id}", response_model=CatalogProductDetail)
 async def get_product(product_id: str):
-    """Get full product details.
+    """Get the storefront product card (US-CAT-03).
 
-    B2B call: ``GET /public/products/{id}`` → ``ProductPublicResponse``.
+    B2B call: ``GET /public/products/{id}`` → ``ProductPublicResponse`` (fresh on
+    every open, no local copy). A 404 from B2B, a missing product, or a product
+    that is not MODERATED all surface as the same 404 ``PRODUCT_NOT_FOUND`` — the
+    buyer must not be able to tell a blocked product from a deleted one.
+
+    Response is mapped field-by-field through :func:`_detail_from_product`:
+    ``cost_price``/``reserved_quantity`` and any other seller-internal field are
+    never copied, because only an explicit allow-list of B2C fields is built.
     """
     product = await _b2b_call(b2b_client.get_public_product(product_id))
 
-    if product is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"code": "PRODUCT_NOT_FOUND", "message": "Product not found"},
-        )
+    if product is None or product.status in HIDDEN_PRODUCT_STATUSES:
+        raise _product_not_found()
 
     return _detail_from_product(product)
 
@@ -448,11 +471,8 @@ async def get_similar_products(
     """
     current = await _b2b_call(b2b_client.get_public_product(product_id))
 
-    if current is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"code": "PRODUCT_NOT_FOUND", "message": "Product not found"},
-        )
+    if current is None or current.status in HIDDEN_PRODUCT_STATUSES:
+        raise _product_not_found()
 
     # Ask for one extra row: B2B may include the current product itself.
     shorts = await _b2b_call(
@@ -775,5 +795,13 @@ alias_router.add_api_route(
     get_products,
     methods=["GET"],
     response_model=PaginatedCatalogProducts,
+    include_in_schema=False,
+)
+
+alias_router.add_api_route(
+    "/products/{product_id}",
+    get_product,
+    methods=["GET"],
+    response_model=CatalogProductDetail,
     include_in_schema=False,
 )
