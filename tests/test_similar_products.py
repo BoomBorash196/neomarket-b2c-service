@@ -1,5 +1,10 @@
 """Tests for GET /api/v1/catalog/products/{product_id}/similar — US-CAT-04.
 
+The B2C response is a plain array of ``CatalogProductCard`` — exactly what the
+published contract declares for
+``/api/v1/catalog/products/{product_id}/similar`` (``b2c/openapi.yaml``), not a
+``{current_product_id, recommendations, reason}`` wrapper.
+
 The B2B side is mocked at the **published client API** level
 (``b2b_client.get_public_product``, ``b2b_client.get_public_similar_products``,
 ``b2b_client.list_public_products``) and the stubbed values are the real
@@ -10,19 +15,14 @@ parsers produce from ``b2b/openapi.yaml``:
 * ``GET /public/products/{id}/similar``    → ``[ProductPublicShortResponse]``
 * ``GET /public/products?category_id=...`` → ``ProductPublicPaginatedResponse``
 
-The previous revision of this file mocked ``get_product_by_id`` and
-``get_similar_products(category_id=...)`` / ``{"products": [...]}`` — a B2B
-contract that does not exist in the spec. The behaviour asserted here is
-unchanged; only the wire shapes are now real.
-
 Covers:
   - similar_returns_up_to_8_from_same_category     (happy path, current excluded)
   - similar_calls_b2b_with_spec_parameters         (no invented category_id)
-  - empty_category_returns_200_empty_list           (no similar → 200 with [])
-  - unknown_product_returns_404                     (non-existent product → 404)
-  - fallback_to_parent_category                     (not enough in same category → parent)
-  - current_product_excluded_from_results           (current product never in similar)
-  - b2b_unavailable_returns_502                     (B2B down → 502)
+  - empty_category_returns_200_empty_list          (no similar → 200 with [])
+  - unknown_product_returns_404                    (non-existent product → 404)
+  - fallback_to_parent_category                    (not enough → parent category)
+  - current_product_excluded_from_results          (current product never in similar)
+  - b2b_unavailable_returns_502                    (B2B down → 502)
 """
 
 from __future__ import annotations
@@ -82,6 +82,7 @@ def _short(
     title: str,
     min_price: int = 100,
     category_id: str = "cat1",
+    cover_image: str = "http://img",
 ) -> B2BProductShort:
     """``ProductPublicShortResponse`` — what the similar endpoint returns."""
     return B2BProductShort(
@@ -91,7 +92,7 @@ def _short(
         status="MODERATED",
         category_id=category_id,
         min_price=min_price,
-        cover_image="http://img",
+        cover_image=cover_image,
         created_at=CREATED_AT,
     )
 
@@ -130,13 +131,13 @@ def test_similar_returns_up_to_8_from_same_category(client: TestClient):
     assert resp.status_code == 200
     data = resp.json()
 
-    assert data["current_product_id"] == "p-current"
-    assert len(data["recommendations"]) == 8  # capped at 8
-    assert data["reason"] == "same_category"
+    # Plain array of CatalogProductCard — no wrapper object.
+    assert isinstance(data, list)
+    assert len(data) == 8  # capped at 8
+    assert [card["id"] for card in data] == [f"p-{i}" for i in range(1, 9)]
 
     # Current product must NOT be in results
-    rec_ids = [r["id"] for r in data["recommendations"]]
-    assert "p-current" not in rec_ids
+    assert "p-current" not in [card["id"] for card in data]
 
     # Verify B2B was called with the spec parameters
     call_args = mock_b2b.get_public_similar_products.call_args
@@ -163,6 +164,7 @@ def test_similar_calls_b2b_with_spec_parameters(client: TestClient):
     mock_b2b.get_public_similar_products.assert_awaited_once()
     kwargs = mock_b2b.get_public_similar_products.call_args.kwargs
     assert "category_id" not in kwargs
+    assert kwargs["limit"] == 9
 
 
 def test_similar_returns_fewer_than_8(client: TestClient):
@@ -182,8 +184,7 @@ def test_similar_returns_fewer_than_8(client: TestClient):
 
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data["recommendations"]) == 2
-    assert data["reason"] == "same_category"  # came from same category
+    assert [card["id"] for card in data] == ["p-2", "p-3"]
 
 
 # ======================================================================
@@ -191,7 +192,7 @@ def test_similar_returns_fewer_than_8(client: TestClient):
 # ======================================================================
 
 def test_empty_category_returns_200_empty_list(client: TestClient):
-    """No similar products → 200 with empty recommendations list."""
+    """No similar products → 200 with an empty array."""
     current = _product("p-1", "Standalone Product", category_id="cat-empty")
 
     with patch(CATALOG_B2B) as mock_b2b:
@@ -203,10 +204,7 @@ def test_empty_category_returns_200_empty_list(client: TestClient):
         resp = client.get("/api/v1/catalog/products/p-1/similar")
 
     assert resp.status_code == 200
-    data = resp.json()
-    assert data["current_product_id"] == "p-1"
-    assert data["recommendations"] == []
-    assert len(data["recommendations"]) == 0
+    assert resp.json() == []
 
 
 def test_empty_category_no_parent_returns_200_empty_list(client: TestClient):
@@ -222,9 +220,7 @@ def test_empty_category_no_parent_returns_200_empty_list(client: TestClient):
         resp = client.get("/api/v1/catalog/products/p-1/similar")
 
     assert resp.status_code == 200
-    data = resp.json()
-    assert data["recommendations"] == []
-    assert data["reason"] == "no_similar_products"
+    assert resp.json() == []
     mock_b2b.list_public_products.assert_not_awaited()
 
 
@@ -243,6 +239,21 @@ def test_unknown_product_returns_404(client: TestClient):
     data = resp.json()
     assert data["code"] == "PRODUCT_NOT_FOUND"
     assert "not found" in data["message"].lower()
+
+
+def test_blocked_product_returns_404(client: TestClient):
+    """A product hidden from buyers has no similar block either."""
+    from dataclasses import replace
+
+    current = replace(_product("p-1", "Blocked", category_id="cat1"), status="BLOCKED")
+
+    with patch(CATALOG_B2B) as mock_b2b:
+        mock_b2b.get_public_product = AsyncMock(return_value=current)
+
+        resp = client.get("/api/v1/catalog/products/p-1/similar")
+
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "PRODUCT_NOT_FOUND"
 
 
 # ======================================================================
@@ -279,10 +290,9 @@ def test_fallback_to_parent_category(client: TestClient):
     data = resp.json()
 
     # Should have 2 from same + 6 from parent = 8
-    assert len(data["recommendations"]) == 8
-    assert data["reason"] == "parent_category"
+    assert len(data) == 8
 
-    rec_ids = [r["id"] for r in data["recommendations"]]
+    rec_ids = [card["id"] for card in data]
     assert "p-sim-1" in rec_ids
     assert "p-sim-2" in rec_ids
     assert "p-parent-1" in rec_ids
@@ -308,8 +318,7 @@ def test_no_fallback_when_no_parent_category(client: TestClient):
         resp = client.get("/api/v1/catalog/products/p-1/similar")
 
     assert resp.status_code == 200
-    data = resp.json()
-    assert data["recommendations"] == []
+    assert resp.json() == []
 
     # Similar endpoint queried exactly once, no parent expansion
     mock_b2b.get_public_similar_products.assert_awaited_once()
@@ -336,9 +345,7 @@ def test_parent_top_up_failure_is_not_fatal(client: TestClient):
         resp = client.get("/api/v1/catalog/products/p-1/similar")
 
     assert resp.status_code == 200
-    data = resp.json()
-    assert [r["id"] for r in data["recommendations"]] == ["p-sim-1"]
-    assert data["reason"] == "same_category"
+    assert [card["id"] for card in resp.json()] == ["p-sim-1"]
 
 
 # ======================================================================
@@ -363,10 +370,9 @@ def test_current_product_excluded_from_results(client: TestClient):
         resp = client.get("/api/v1/catalog/products/p-1/similar")
 
     assert resp.status_code == 200
-    data = resp.json()
-    rec_ids = [r["id"] for r in data["recommendations"]]
+    rec_ids = [card["id"] for card in resp.json()]
     assert "p-1" not in rec_ids
-    assert len(data["recommendations"]) == 2  # only non-current ones
+    assert len(rec_ids) == 2  # only non-current ones
 
 
 def test_current_product_excluded_from_parent_fallback(client: TestClient):
@@ -390,10 +396,9 @@ def test_current_product_excluded_from_parent_fallback(client: TestClient):
         resp = client.get("/api/v1/catalog/products/p-1/similar")
 
     assert resp.status_code == 200
-    data = resp.json()
-    rec_ids = [r["id"] for r in data["recommendations"]]
+    rec_ids = [card["id"] for card in resp.json()]
     assert "p-1" not in rec_ids
-    assert len(data["recommendations"]) == 2  # only parent ones, current excluded
+    assert len(rec_ids) == 2  # only parent ones, current excluded
 
 
 # ======================================================================
@@ -424,10 +429,9 @@ def test_duplicate_product_ids_filtered(client: TestClient):
         resp = client.get("/api/v1/catalog/products/p-1/similar")
 
     assert resp.status_code == 200
-    data = resp.json()
-    rec_ids = [r["id"] for r in data["recommendations"]]
+    rec_ids = [card["id"] for card in resp.json()]
     assert rec_ids.count("p-dup") == 1  # deduplicated
-    assert len(data["recommendations"]) == 3
+    assert len(rec_ids) == 3
 
 
 # ======================================================================
@@ -477,10 +481,12 @@ def test_b2b_unavailable_similar_lookup_returns_502(client: TestClient):
 # TEST 8 — response schema correctness
 # ======================================================================
 
-def test_similar_response_schema(client: TestClient):
-    """Response matches RecommendationList schema."""
+def test_similar_response_matches_catalog_product_card(client: TestClient):
+    """Each item is a B2C `CatalogProductCard` with `ImageRef` images."""
     current = _product("p-1", "Product", category_id="cat1")
-    similar_products = [_short("p-2", "Wireless Headphones", min_price=4999)]
+    similar_products = [
+        _short("p-2", "Wireless Headphones", min_price=4999, cover_image="https://cdn/x.jpg")
+    ]
 
     with patch(CATALOG_B2B) as mock_b2b:
         mock_b2b.get_public_product = AsyncMock(return_value=current)
@@ -491,23 +497,82 @@ def test_similar_response_schema(client: TestClient):
 
     assert resp.status_code == 200
     data = resp.json()
+    assert isinstance(data, list)
+    assert "current_product_id" not in data  # no wrapper object
 
-    assert "current_product_id" in data
-    assert "recommendations" in data
-    assert "reason" in data
+    card = data[0]
+    assert set(card) == {"id", "name", "slug", "min_price", "has_stock", "images"}
+    assert card["id"] == "p-2"
+    assert card["name"] == "Wireless Headphones"
+    assert card["slug"] == "p-2"
+    assert card["min_price"] == 4999
+    assert card["has_stock"] is True
 
-    assert data["current_product_id"] == "p-1"
-    assert isinstance(data["recommendations"], list)
-    assert isinstance(data["reason"], str)
+    image = card["images"][0]
+    assert set(image) == {"id", "url", "ordering", "is_main", "alt"}
+    assert image["url"] == "https://cdn/x.jpg"
+    assert image["ordering"] == 0
+    assert image["is_main"] is True
+    # Stable id derived from product + URL (B2B gives no image id on short schema)
+    assert len(image["id"]) == 36
 
-    rec = data["recommendations"][0]
-    assert "id" in rec
-    assert "name" in rec
-    assert "main_image_url" in rec
-    assert "min_price" in rec
-    assert "has_stock" in rec
 
-    assert rec["id"] == "p-2"
-    assert rec["name"] == "Wireless Headphones"
-    assert rec["main_image_url"] == "http://img"
-    assert rec["min_price"] == 4999
+def test_similar_limit_query_param(client: TestClient):
+    """The published `limit` parameter bounds the block size."""
+    current = _product("p-1", "Product", category_id="cat1")
+    similar_products = [_short(f"p-{i}", f"Similar {i}") for i in range(1, 11)]
+
+    with patch(CATALOG_B2B) as mock_b2b:
+        mock_b2b.get_public_product = AsyncMock(return_value=current)
+        mock_b2b.get_public_similar_products = AsyncMock(return_value=similar_products)
+
+        resp = client.get("/api/v1/catalog/products/p-1/similar?limit=3")
+
+    assert resp.status_code == 200
+    assert len(resp.json()) == 3
+    assert mock_b2b.get_public_similar_products.call_args.kwargs["limit"] == 4
+
+
+@pytest.mark.parametrize("limit", [0, 51])
+def test_similar_limit_out_of_range_returns_422(client: TestClient, limit: int):
+    """`limit` is constrained by the B2C contract (1..50)."""
+    with patch(CATALOG_B2B) as mock_b2b:
+        mock_b2b.get_public_product = AsyncMock(
+            return_value=_product("p-1", "Product", category_id="cat1")
+        )
+
+        resp = client.get(f"/api/v1/catalog/products/p-1/similar?limit={limit}")
+
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "VALIDATION_ERROR"
+
+
+def test_similar_limit_50_stays_within_b2b_contract(client: TestClient):
+    """B2B caps `limit` at 50 too — never request 51."""
+    current = _product("p-1", "Product", category_id="cat1")
+
+    with patch(CATALOG_B2B) as mock_b2b:
+        mock_b2b.get_public_product = AsyncMock(return_value=current)
+        mock_b2b.get_public_similar_products = AsyncMock(return_value=[])
+        mock_b2b.get_categories = AsyncMock(return_value=_category_tree("cat1", None))
+
+        resp = client.get("/api/v1/catalog/products/p-1/similar?limit=50")
+
+    assert resp.status_code == 200
+    assert mock_b2b.get_public_similar_products.call_args.kwargs["limit"] == 50
+
+
+def test_similar_available_via_products_alias(client: TestClient):
+    """`GET /api/v1/products/{id}/similar` from the task hits the same handler."""
+    current = _product("p-1", "Product", category_id="cat1")
+    similar_products = [_short("p-2", "Similar A")]
+
+    with patch(CATALOG_B2B) as mock_b2b:
+        mock_b2b.get_public_product = AsyncMock(return_value=current)
+        mock_b2b.get_public_similar_products = AsyncMock(return_value=similar_products)
+        mock_b2b.get_categories = AsyncMock(return_value=_category_tree("cat1", None))
+
+        resp = client.get("/api/v1/products/p-1/similar")
+
+    assert resp.status_code == 200
+    assert [card["id"] for card in resp.json()] == ["p-2"]
