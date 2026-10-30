@@ -30,9 +30,7 @@ from src.schemas import (
     FilterValue,
     ImageRef,
     PaginatedCatalogProducts,
-    ProductBasic,
     ProductFilters,
-    RecommendationList,
 )
 from src.services.b2b_client import b2b_client, B2BClientError
 from src.services.b2b_public_catalog import B2BProduct, B2BProductShort
@@ -454,87 +452,70 @@ async def get_facets(
 SIMILAR_LIMIT: int = 8
 
 
-@router.get("/products/{product_id}/similar", response_model=RecommendationList)
+@router.get("/products/{product_id}/similar", response_model=List[CatalogProductCard])
 async def get_similar_products(
     product_id: str,
-    db: AsyncSession = Depends(get_db),
+    limit: int = Query(SIMILAR_LIMIT, ge=1, le=50),
 ):
-    """Get similar products, excluding the current product.
+    """Get similar products — ``GET /api/v1/catalog/products/{id}/similar``.
 
-    B2B call: ``GET /public/products/{id}/similar?limit=`` → an array of
-    ``ProductPublicShortResponse``. That operation accepts only ``product_id``
-    and ``limit`` — it has no ``category_id`` parameter, so the parent-category
-    expansion from the canon flow cannot be requested from B2B today. If the
-    category tree is reachable we still top the list up from the parent
-    category via ``GET /public/products?category_id=...``; otherwise the buyer
-    gets whatever the same-category selection returned.
+    Response is a plain array of ``CatalogProductCard`` (B2C ``openapi.yaml``,
+    ``/catalog/products/{product_id}/similar``), not a wrapper object.
+
+    Selection is proxied to B2B: ``GET /public/products/{id}/similar?limit=``
+    returns ``[ProductPublicShortResponse]`` from the same category. We ask for
+    one extra row because B2B may include the current product itself, then drop
+    it and any duplicates.
+
+    The canon flow requires the block to hold up to 8 items and to top the list
+    up from the parent category when the same-category selection is shorter.
+    ``limit`` defaults to 8 (the block size); the published contract allows the
+    caller to widen the request up to 50. A missing/blocked current product is
+    404. No similar products at all is a valid ``200 []`` — the front end hides
+    the block.
     """
     current = await _b2b_call(b2b_client.get_public_product(product_id))
 
     if current is None or current.status in HIDDEN_PRODUCT_STATUSES:
         raise _product_not_found()
 
-    # Ask for one extra row: B2B may include the current product itself.
+    # One extra row: B2B may include the current product. B2B caps `limit` at 50
+    # (same maximum as the B2C contract), so the extra row is clamped.
     shorts = await _b2b_call(
-        b2b_client.get_public_similar_products(product_id, limit=SIMILAR_LIMIT + 1)
+        b2b_client.get_public_similar_products(product_id, limit=min(limit + 1, 50))
     )
 
-    seen: set[str] = set()
-    recommendations: List[ProductBasic] = []
+    seen: set[str] = {product_id}
+    cards: List[CatalogProductCard] = []
 
     def _collect(items) -> None:
         for item in items:
-            if item.id == product_id or item.id in seen:
-                continue
-            if len(recommendations) >= SIMILAR_LIMIT:
+            if len(cards) >= limit:
                 return
+            if item.id in seen:
+                continue
             seen.add(item.id)
-            recommendations.append(
-                ProductBasic(
-                    id=item.id,
-                    name=item.title,
-                    main_image_url=item.cover_image or "",
-                    min_price=item.min_price,
-                    has_stock=True,
-                )
-            )
+            cards.append(_card_from_short(item))
 
     _collect(shorts)
-    from_same_category = bool(recommendations)
 
-    filled_from_parent = False
-    if len(recommendations) < SIMILAR_LIMIT:
+    if len(cards) < limit:
         parent_category_id = await _resolve_parent_category(current.category_id)
         if parent_category_id:
             try:
                 page = await b2b_client.list_public_products(
                     category_id=parent_category_id,
                     sort="created_desc",
-                    limit=(SIMILAR_LIMIT - len(recommendations)) * 2,
+                    limit=(limit - len(cards)) * 2,
                     offset=0,
                 )
             except B2BClientError:
                 # Non-fatal — return what the same-category call produced.
                 page = None
             if page is not None:
-                before = len(recommendations)
                 _collect(page.items)
-                filled_from_parent = len(recommendations) > before
 
-    if not recommendations:
-        reason = "no_similar_products"
-    elif filled_from_parent:
-        reason = "parent_category"
-    elif from_same_category:
-        reason = "same_category"
-    else:
-        reason = "no_similar_products"
-
-    return RecommendationList(
-        current_product_id=product_id,
-        recommendations=recommendations,
-        reason=reason,
-    )
+    return cards
 
 
 async def _resolve_parent_category(category_id: str) -> Optional[str]:
@@ -803,5 +784,13 @@ alias_router.add_api_route(
     get_product,
     methods=["GET"],
     response_model=CatalogProductDetail,
+    include_in_schema=False,
+)
+
+alias_router.add_api_route(
+    "/products/{product_id}/similar",
+    get_similar_products,
+    methods=["GET"],
+    response_model=List[CatalogProductCard],
     include_in_schema=False,
 )
