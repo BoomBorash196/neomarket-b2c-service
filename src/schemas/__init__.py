@@ -201,44 +201,25 @@ class Subscription(BaseModel):
 
 
 # --- Category schemas ---
-class CategoryNode(BaseModel):
-    """Category tree node."""
-    category_id: str
+class CategoryRef(BaseModel):
+    """B2C ``CategoryRef`` (openapi.yaml:995).
+
+    ``path`` is the breadcrumb chain from the root to this category (names),
+    computed from the B2B adjacency list; ``level`` is the depth (root = 0).
+    The published B2C schema types ``path`` as an array of strings — B2B's own
+    ``path`` is a materialized string (``electronics/phones``), so the array is
+    derived on the B2C side.
+    """
+    id: str
     name: str
     parent_id: Optional[str] = None
-    children: List["CategoryNode"] = []
+    level: int = 0
+    path: List[str] = []
 
 
-class CategoryItem(BaseModel):
-    """Single category in flat list (B2B contract: id/name/parent_id)."""
-    category_id: str
-    name: str
-    parent_id: Optional[str] = None
-
-
-class CategoryListResponse(BaseModel):
-    """Envelope for flat category list."""
-    items: List[CategoryItem]
-
-
-
-class CategoryDetail(BaseModel):
-    """Detailed info about a single category."""
-    category_id: str
-    name: str
-    parent_id: Optional[str] = None
-
-
-class BreadcrumbItem(BaseModel):
-    """A single item in the breadcrumbs chain."""
-    category_id: str
-    name: str
-    parent_id: Optional[str] = None
-
-
-class BreadcrumbsResponse(BaseModel):
-    """Breadcrumbs path from root to target category."""
-    items: List[BreadcrumbItem]
+class CategoryTreeNode(CategoryRef):
+    """B2C ``CategoryTreeNode`` (openapi.yaml:1008): CategoryRef + children."""
+    children: List["CategoryTreeNode"] = []
 
 
 # --- Collection/Banner schemas ---

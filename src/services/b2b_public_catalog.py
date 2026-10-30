@@ -10,6 +10,7 @@ B2B operation                        Payload schema
 ``GET  /public/products/{id}``       ``ProductPublicResponse``
 ``GET  /public/products/{id}/similar``  ``[ProductPublicShortResponse]``
 ``POST /public/products/batch``      ``[ProductPublicResponse]``
+``GET  /categories``                 ``[CategoryResponse]``
 ===================================  ==================================
 
 The readers are intentionally strict. A payload that does not match the
@@ -35,12 +36,15 @@ __all__ = [
     "B2BProductShort",
     "B2BProductPage",
     "B2BProduct",
+    "B2BCategory",
     "B2B_SORT_VALUES",
     "parse_product_short",
     "parse_product_shorts",
     "parse_product_page",
     "parse_product",
     "parse_products",
+    "parse_category",
+    "parse_categories",
 ]
 
 
@@ -115,6 +119,15 @@ def _req_status(obj: Mapping[str, Any], key: str, path: str) -> str:
     return status
 
 
+def _req_bool(obj: Mapping[str, Any], key: str, path: str) -> bool:
+    if key not in obj:
+        raise B2BPayloadError(f"{path}.{key}: field is required by the B2B schema")
+    value = obj[key]
+    if not isinstance(value, bool):
+        raise B2BPayloadError(f"{path}.{key}: expected boolean, got {type(value).__name__}")
+    return value
+
+
 # ======================================================================
 # Value objects
 # ======================================================================
@@ -183,6 +196,31 @@ class B2BProductPage:
     total_count: int
     limit: int
     offset: int
+
+
+@dataclass(frozen=True)
+class B2BCategory:
+    """``CategoryResponse`` from B2B ``GET /api/v1/categories``.
+
+    B2B stores the tree as an adjacency list (``parent_id``) plus a
+    materialized path string (``path``, e.g. ``"electronics/phones"``) and a
+    ``level``. The public B2C contract wants ``level`` and ``path`` as an
+    **array of breadcrumb strings**, so the B2C side recomputes both from
+    ``parent_id`` (and validates the hierarchy while doing so).
+    """
+
+    id: str
+    name: str
+    parent_id: str | None
+    level: int
+    path: str
+    is_active: bool
+    created_at: str
+
+    @property
+    def path_segments(self) -> list[str]:
+        """B2B's materialized path as segments (``electronics/phones`` → 2 items)."""
+        return [segment for segment in self.path.split("/") if segment]
 
 
 @dataclass(frozen=True)
@@ -313,3 +351,25 @@ def parse_product(raw: Any, path: str = "product") -> B2BProduct:
 def parse_products(raw: Any, path: str = "products") -> list[B2BProduct]:
     """Read an array of ``ProductPublicResponse``."""
     return [parse_product(item, f"{path}[{i}]") for i, item in enumerate(_sequence(raw, path))]
+
+
+# ======================================================================
+# Categories — ``GET /api/v1/categories`` → ``[CategoryResponse]``
+# ======================================================================
+def parse_category(raw: Any, path: str = "category") -> B2BCategory:
+    """Read one ``CategoryResponse``: {id, name, parent_id, level, path, ...}."""
+    obj = _mapping(raw, path)
+    return B2BCategory(
+        id=_req_str(obj, "id", path),
+        name=_req_str(obj, "name", path),
+        parent_id=_opt_str(obj, "parent_id", path),
+        level=_req_int(obj, "level", path),
+        path=_req_str(obj, "path", path),
+        is_active=_req_bool(obj, "is_active", path),
+        created_at=_req_str(obj, "created_at", path),
+    )
+
+
+def parse_categories(raw: Any, path: str = "categories") -> list[B2BCategory]:
+    """Read an array of ``CategoryResponse``."""
+    return [parse_category(item, f"{path}[{i}]") for i, item in enumerate(_sequence(raw, path))]
