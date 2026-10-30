@@ -34,6 +34,7 @@ from fastapi.testclient import TestClient
 
 from src.main import app
 from src.services.b2b_public_catalog import (
+    B2BCategory,
     B2BProduct,
     B2BProductPage,
     B2BProductShort,
@@ -102,12 +103,22 @@ def _page(items: list[B2BProductShort], limit: int = 50, offset: int = 0) -> B2B
     return B2BProductPage(items=items, total_count=len(items), limit=limit, offset=offset)
 
 
-def _category_tree(category_id: str, parent_id: str | None) -> list[dict]:
+def _category_tree(category_id: str, parent_id: str | None) -> list[B2BCategory]:
     """``GET /categories`` payload as consumed by ``_resolve_parent_category``."""
-    row = {"category_id": category_id, "name": category_id, "parent_id": parent_id}
+    def row(cid: str, pid: str | None) -> B2BCategory:
+        return B2BCategory(
+            id=cid,
+            name=cid,
+            parent_id=pid,
+            level=0 if pid is None else 1,
+            path=cid,
+            is_active=True,
+            created_at=CREATED_AT,
+        )
+
     if parent_id:
-        return [row, {"category_id": parent_id, "name": parent_id, "parent_id": None}]
-    return [row]
+        return [row(category_id, parent_id), row(parent_id, None)]
+    return [row(category_id, None)]
 
 
 # ======================================================================

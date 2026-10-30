@@ -28,10 +28,12 @@ import httpx
 from src.config import settings
 from src.services.b2b_public_catalog import (
     B2B_SORT_VALUES,
+    B2BCategory,
     B2BPayloadError,
     B2BProduct,
     B2BProductPage,
     B2BProductShort,
+    parse_categories,
     parse_product,
     parse_product_page,
     parse_product_shorts,
@@ -300,18 +302,16 @@ class B2BClient:
                 return None
             raise
 
-    async def get_categories(self) -> list[dict]:
-        """Get category list from B2B.
+    async def get_categories(self) -> list[B2BCategory]:
+        """``GET /api/v1/categories`` (read-open) → ``[CategoryResponse]``.
 
-        Caveat: the published B2B contract only declares ``/api/v1/categories``
-        with ``HTTPBearer`` (seller auth) — there is no public categories
-        endpoint for ``X-Service-Key``. Tracked as a protocol question.
+        The published B2B contract stores the tree as an adjacency list plus a
+        materialized path; field names are ``id`` / ``parent_id`` / ``level`` /
+        ``path`` (not ``category_id``), so the body is read through the strict
+        parser. A payload that does not match the schema is a protocol fault
+        (502), never a silently empty navigation tree.
         """
-        try:
-            result = await self._request("GET", "/categories")
-            return result if isinstance(result, list) else []
-        except B2BClientError:
-            return []
+        return await self._request_parsed("GET", "/categories", parse_categories)
 
     async def get_products_batch(self, product_ids: list[str]) -> dict[str, dict]:
         """Get multiple products by IDs (batch request)."""

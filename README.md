@@ -84,9 +84,13 @@ neomarket-b2c-service/
 ## API Endpoints
 
 ### Каталог
-- `GET /api/v1/catalog/categories` — получить дерево категорий
+- `GET /api/v1/catalog/categories` — плоский список категорий (`CategoryRef`)
+- `GET /api/v1/catalog/categories/tree` — дерево категорий (`CategoryTreeNode`)
+- `GET /api/v1/catalog/categories/{category_id}` — детали категории
+- `GET /api/v1/catalog/breadcrumbs?category_id=…|product_id=…` — хлебные крошки от корня
 - `GET /api/v1/catalog/products` — получить список товаров (с фильтрами)
 - `GET /api/v1/catalog/products/{product_id}` — детали товара
+- `GET /api/v1/catalog/products/{product_id}/similar` — похожие товары
 - `GET /api/v1/catalog/categories/{category_id}/filters` — доступные фильтры
 
 ### Корзина

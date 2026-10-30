@@ -15,15 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.schemas import (
-    BreadcrumbItem,
-    BreadcrumbsResponse,
     CatalogProductCard,
     CatalogProductDetail,
     CatalogSku,
-    CategoryDetail,
-    CategoryItem,
-    CategoryListResponse,
-    CategoryNode,
+    CategoryRef,
+    CategoryTreeNode,
     FacetBucket,
     FacetsResponse,
     FilterOption,
@@ -33,7 +29,7 @@ from src.schemas import (
     ProductFilters,
 )
 from src.services.b2b_client import b2b_client, B2BClientError
-from src.services.b2b_public_catalog import B2BProduct, B2BProductShort
+from src.services.b2b_public_catalog import B2BCategory, B2BProduct, B2BProductShort
 from src.services.facet_service import FacetSelection, get_facets as compute_facets
 
 router = APIRouter()
@@ -278,22 +274,24 @@ async def _b2b_call(coro):
 # ---------------------------------------------------------------------------
 # GET /api/v1/catalog/categories
 # ---------------------------------------------------------------------------
-@router.get("/categories", response_model=CategoryListResponse)
+@router.get("/categories", response_model=List[CategoryRef])
 async def get_categories():
-    """Get the full category tree from B2B."""
-    try:
-        categories = await b2b_client.get_categories()
-        items = [
-            CategoryItem(
-                category_id=str(c.get("category_id", "")),
-                name=str(c.get("name", "")),
-                parent_id=c.get("parent_id"),
-            )
-            for c in categories
-        ]
-        return CategoryListResponse(items=items)
-    except B2BClientError as exc:
-        raise _b2b_error(502, exc.message)
+    """Flat category list in the published B2C ``CategoryRef`` shape.
+
+    B2B stores the tree as an adjacency list (``parent_id``); ``level`` and the
+    breadcrumb ``path`` array are recomputed from those links. A broken
+    hierarchy is a 422, not an empty or silently flattened list.
+    """
+    flat = await _b2b_call(b2b_client.get_categories())
+    by_id = _category_index(flat)
+
+    refs: List[CategoryRef] = []
+    for category in flat:
+        try:
+            refs.append(_ref_from_chain(_category_chain(category.id, by_id)))
+        except ValueError as exc:
+            _raise_category_lookup_error(exc)
+    return refs
 
 
 # ---------------------------------------------------------------------------
@@ -525,160 +523,158 @@ async def _resolve_parent_category(category_id: str) -> Optional[str]:
     except B2BClientError:
         return None
     for category in categories:
-        if str(category.get("category_id", "")) == category_id:
-            parent = category.get("parent_id")
-            return str(parent) if parent else None
+        if category.id == category_id:
+            return category.parent_id
     return None
 
 
 # ---------------------------------------------------------------------------
 # Helpers for category navigation
 # ---------------------------------------------------------------------------
+class _UnknownCategory(ValueError):
+    """The requested category is not present in the B2B category list."""
 
-def _build_category_tree(flat_categories: List[dict]) -> List[CategoryNode]:
-    """Build a nested tree from a flat list of category dicts.
 
-    Each dict must have at least `category_id`, `name`, and optionally `parent_id`.
+class _BrokenCategoryHierarchy(ValueError):
+    """B2B returned an orphan node or a cycle."""
+
+
+def _category_index(categories: List[B2BCategory]) -> dict[str, B2BCategory]:
+    return {category.id: category for category in categories}
+
+
+def _category_chain(category_id: str, by_id: dict[str, B2BCategory]) -> List[B2BCategory]:
+    """Walk ``parent_id`` links from the category up to the root.
+
+    Raises:
+        _UnknownCategory — the id is absent from the B2B list (→ 404).
+        _BrokenCategoryHierarchy — a parent is missing or the links form a
+            cycle (→ 422): the tree cannot be represented truthfully.
     """
-    by_id: dict[str, CategoryNode] = {}
-    roots: List[CategoryNode] = []
-
-    for c in flat_categories:
-        cid = str(c.get("category_id", ""))
-        if not cid:
-            continue
-        by_id[cid] = CategoryNode(
-            category_id=cid,
-            name=str(c.get("name", "")),
-            parent_id=c.get("parent_id"),
-        )
-
-    for cid, node in by_id.items():
-        if node.parent_id and node.parent_id in by_id:
-            by_id[node.parent_id].children.append(node)
-        else:
-            roots.append(node)
-
-    return roots
-
-
-def _find_category(
-    category_id: str,
-    tree: List[CategoryNode],
-) -> Optional[CategoryNode]:
-    """Find a category node by ID in a nested tree."""
-    for node in tree:
-        if node.category_id == category_id:
-            return node
-        found = _find_category(category_id, node.children)
-        if found:
-            return found
-    return None
-
-
-def _build_breadcrumbs(
-    category_id: str,
-    flat_categories: List[dict],
-) -> List[BreadcrumbItem]:
-    """Build breadcrumbs path from root to target category.
-
-    Raises ValueError on orphan node (parent_id points to non-existent category).
-    """
-    by_id: dict[str, dict] = {}
-    for c in flat_categories:
-        cid = str(c.get("category_id", ""))
-        if cid:
-            by_id[cid] = c
-
     if category_id not in by_id:
-        raise ValueError(f"Category {category_id} not found")
+        raise _UnknownCategory(f"Category {category_id} not found")
 
-    path: List[dict] = []
-    current_id: Optional[str] = category_id
-    visited: set = set()
+    chain: List[B2BCategory] = []
+    seen: set[str] = set()
+    current = by_id[category_id]
 
-    while current_id:
-        if current_id in visited:
-            # Cycle detected — treat as orphan
-            raise ValueError(f"Cycle detected in category hierarchy at {current_id}")
-        visited.add(current_id)
+    while True:
+        if current.id in seen:
+            raise _BrokenCategoryHierarchy(
+                f"Cycle detected in category hierarchy at {current.id}"
+            )
+        seen.add(current.id)
+        chain.append(current)
 
-        if current_id not in by_id:
-            raise ValueError(f"Orphan node: {current_id} has no definition in category list")
+        if current.parent_id is None:
+            break
+        parent = by_id.get(current.parent_id)
+        if parent is None:
+            raise _BrokenCategoryHierarchy(
+                f"Orphan node: {current.id} references missing parent {current.parent_id}"
+            )
+        current = parent
 
-        entry = by_id[current_id]
-        path.append(entry)
-        current_id = entry.get("parent_id")
+    chain.reverse()  # root → leaf
+    return chain
 
-    # Reverse so root → leaf
-    path.reverse()
-    return [
-        BreadcrumbItem(
-            category_id=str(p.get("category_id", "")),
-            name=str(p.get("name", "")),
-            parent_id=p.get("parent_id"),
-        )
-        for p in path
-    ]
+
+def _ref_from_chain(chain: List[B2BCategory]) -> CategoryRef:
+    """Build a B2C ``CategoryRef`` with the computed level and breadcrumb path."""
+    leaf = chain[-1]
+    return CategoryRef(
+        id=leaf.id,
+        name=leaf.name,
+        parent_id=leaf.parent_id,
+        level=len(chain) - 1,
+        path=[category.name for category in chain],
+    )
+
+
+def _raise_category_lookup_error(exc: ValueError):
+    """Map a broken/unknown category lookup to the B2C error contract."""
+    if isinstance(exc, _UnknownCategory):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "CATEGORY_NOT_FOUND", "message": str(exc)},
+        ) from exc
+    raise HTTPException(
+        status_code=422,
+        detail={"code": "ORPHAN_NODE", "message": str(exc)},
+    ) from exc
 
 
 # ---------------------------------------------------------------------------
 # GET /api/v1/catalog/categories/tree
 # ---------------------------------------------------------------------------
 
-@router.get("/categories/tree", response_model=list[CategoryNode])
+@router.get("/categories/tree", response_model=List[CategoryTreeNode])
 async def get_category_tree():
-    """Get the full category tree as a nested structure."""
-    try:
-        flat = await b2b_client.get_categories()
-    except B2BClientError as exc:
-        raise _b2b_error(502, exc.message)
+    """Get the full category tree as a nested structure.
 
-    tree = _build_category_tree(flat)
-    return tree
+    The tree is rebuilt from B2B's flat adjacency list. Every node carries the
+    B2C ``CategoryRef`` fields (``id``/``name``/``parent_id``/``level``/
+    ``path``) plus ``children``. A broken hierarchy (parent missing, cycle) is
+    reported as 422 instead of silently re-parenting the node to the root.
+    """
+    flat = await _b2b_call(b2b_client.get_categories())
+    by_id = _category_index(flat)
+
+    nodes: dict[str, CategoryTreeNode] = {}
+    for category in flat:
+        try:
+            ref = _ref_from_chain(_category_chain(category.id, by_id))
+        except ValueError as exc:
+            _raise_category_lookup_error(exc)
+        nodes[category.id] = CategoryTreeNode(**ref.model_dump(), children=[])
+
+    roots: List[CategoryTreeNode] = []
+    for category in flat:
+        node = nodes[category.id]
+        if category.parent_id is None:
+            roots.append(node)
+        else:
+            nodes[category.parent_id].children.append(node)
+
+    return roots
 
 
 # ---------------------------------------------------------------------------
 # GET /api/v1/catalog/categories/{category_id}
 # ---------------------------------------------------------------------------
 
-@router.get("/categories/{category_id}", response_model=CategoryDetail)
+@router.get("/categories/{category_id}", response_model=CategoryRef)
 async def get_category_detail(category_id: str):
-    """Get details for a single category."""
+    """Get details for a single category (``CategoryRef`` shape)."""
+    flat = await _b2b_call(b2b_client.get_categories())
+    by_id = _category_index(flat)
+
     try:
-        flat = await b2b_client.get_categories()
-    except B2BClientError as exc:
-        raise _b2b_error(502, exc.message)
+        chain = _category_chain(category_id, by_id)
+    except ValueError as exc:
+        _raise_category_lookup_error(exc)
 
-    node = _find_category(category_id, _build_category_tree(flat))
-    if node is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"code": "CATEGORY_NOT_FOUND", "message": f"Category {category_id} not found"},
-        )
-
-    return CategoryDetail(
-        category_id=node.category_id,
-        name=node.name,
-        parent_id=node.parent_id,
-    )
+    return _ref_from_chain(chain)
 
 
 # ---------------------------------------------------------------------------
 # GET /api/v1/catalog/breadcrumbs
 # ---------------------------------------------------------------------------
 
-@router.get("/breadcrumbs", response_model=BreadcrumbsResponse)
+@router.get("/breadcrumbs", response_model=List[CategoryRef])
 async def get_breadcrumbs(
     category_id: Optional[str] = Query(None, description="Category ID for breadcrumbs"),
     product_id: Optional[str] = Query(None, description="Product ID — breadcrumbs built from its category"),
 ):
-    """Build breadcrumbs path from root to the target category.
+    """Build the breadcrumb chain from the root down to the target category.
 
-    Accepts exactly one of: category_id or product_id.
-    Both provided → 400. Neither provided → 400.
-    Orphan / broken hierarchy → 422.
-    Unknown category → 404.
+    Accepts exactly one of ``category_id`` / ``product_id``:
+    both → 400 ``AMBIGUOUS_PARAMS``; neither → 400 ``MISSING_PARAMS``.
+    Unknown category → 404 ``CATEGORY_NOT_FOUND``; orphan node / cycle → 422
+    ``ORPHAN_NODE``.
+
+    The response reuses the published ``CategoryRef`` schema; each item carries
+    its own ``level`` and ``path`` (breadcrumb names from the root).
     """
     if category_id and product_id:
         raise HTTPException(
@@ -698,58 +694,26 @@ async def get_breadcrumbs(
             },
         )
 
-    target_category_id: Optional[str] = category_id
+    target_category_id = category_id
 
-    # If only product_id given, resolve its category
-    if product_id and not category_id:
-        try:
-            product = await b2b_client.get_product_by_id(product_id)
-        except B2BClientError as exc:
-            raise _b2b_error(502, exc.message)
-
-        if product is None:
+    if product_id:
+        product = await _b2b_call(b2b_client.get_public_product(product_id))
+        if product is None or product.status in HIDDEN_PRODUCT_STATUSES:
             raise HTTPException(
                 status_code=404,
                 detail={"code": "PRODUCT_NOT_FOUND", "message": "Product not found"},
             )
+        target_category_id = product.category_id
 
-        target_category_id = product.get("category_id")
-        if not target_category_id:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "code": "CATEGORY_MISSING",
-                    "message": "Product has no category_id",
-                },
-            )
-
-    if not target_category_id:
-        raise HTTPException(
-            status_code=400,
-            detail={"code": "NO_TARGET", "message": "No category resolved"},
-        )
+    flat = await _b2b_call(b2b_client.get_categories())
+    by_id = _category_index(flat)
 
     try:
-        flat = await b2b_client.get_categories()
-    except B2BClientError as exc:
-        raise _b2b_error(502, exc.message)
-
-    try:
-        breadcrumbs = _build_breadcrumbs(target_category_id, flat)
+        chain = _category_chain(target_category_id or "", by_id)
     except ValueError as exc:
-        msg = str(exc)
-        if "Orphan" in msg or "Cycle" in msg:
-            raise HTTPException(
-                status_code=422,
-                detail={"code": "ORPHAN_NODE", "message": msg},
-            )
-        # "not found"
-        raise HTTPException(
-            status_code=404,
-            detail={"code": "CATEGORY_NOT_FOUND", "message": msg},
-        )
+        _raise_category_lookup_error(exc)
 
-    return BreadcrumbsResponse(items=breadcrumbs)
+    return [_ref_from_chain(chain[: index + 1]) for index in range(len(chain))]
 
 
 # ---------------------------------------------------------------------------
