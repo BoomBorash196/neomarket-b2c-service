@@ -96,6 +96,18 @@ class BannerModel(Base):
     link_url = Column(String(500))
     priority = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
+    starts_at = Column(DateTime(timezone=True), nullable=True)
+    ends_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class BannerClickEventModel(Base):
+    """CTR analytics: one row per banner click."""
+    __tablename__ = "banner_click_events"
+
+    event_id = Column(String(64), primary_key=True, default=_uuid_str)
+    banner_id = Column(String(64), nullable=False, index=True)
+    user_id = Column(String(64), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

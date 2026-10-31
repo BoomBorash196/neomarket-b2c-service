@@ -8,11 +8,12 @@ from typing import List, Optional
 from datetime import datetime, timezone
 
 from src.database import get_db
-from src.models import BannerModel, CollectionModel
-from src.schemas import Banner, Collection, CollectionProduct
+from src.models import BannerModel, CollectionModel, BannerClickEventModel
+from src.schemas import Banner, Collection, CollectionProduct, BannerClickCreate
 from src.services.b2b_client import b2b_client, B2BClientError
 
 router = APIRouter()
+banner_events_router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
@@ -25,11 +26,15 @@ async def get_active_banners(
     now: Optional[datetime] = Query(None, description="Current time for testing (ISO 8601)"),
 ):
     """Get active promotional banners visible at the given time."""
-    current = now or datetime.now(timezone.utc)
+    current = now if isinstance(now, datetime) else None
+    current = current or datetime.now(timezone.utc)
 
     conditions = [
         BannerModel.is_active == True,
     ]
+    # Schedule filter: banner visible only within [starts_at, ends_at]
+    conditions.append(or_(BannerModel.starts_at.is_(None), BannerModel.starts_at <= current))
+    conditions.append(or_(BannerModel.ends_at.is_(None), BannerModel.ends_at >= current))
 
     result = await db.execute(
         select(BannerModel)
@@ -49,6 +54,38 @@ async def get_active_banners(
         )
         for b in banners
     ]
+
+
+# ---------------------------------------------------------------------------
+# Banner events (CTR analytics)
+# ---------------------------------------------------------------------------
+
+@banner_events_router.post("/banner-events", status_code=status.HTTP_204_NO_CONTENT)
+async def record_banner_event(
+    payload: BannerClickCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Record a banner click/impression for CTR analytics.
+
+    Unknown banner → 400. Storage: one row per event (relational table).
+    """
+    result = await db.execute(
+        select(BannerModel).where(BannerModel.banner_id == payload.banner_id)
+    )
+    banner = result.scalar_one_or_none()
+    if banner is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "BANNER_NOT_FOUND", "message": f"Banner {payload.banner_id} not found"},
+        )
+
+    event = BannerClickEventModel(
+        banner_id=payload.banner_id,
+        user_id=payload.user_id,
+    )
+    db.add(event)
+    await db.commit()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +205,7 @@ async def get_collection(
 @router.get("", response_model=dict)
 async def get_home_data(db: AsyncSession = Depends(get_db)):
     """Get all data needed for home page in one call."""
-    banners = await get_active_banners(db)
+    banners = await get_active_banners(db, now=None)
     collections = await get_collections(db)
 
     return {
