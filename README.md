@@ -100,6 +100,11 @@ neomarket-b2c-service/
 - `DELETE /api/v1/cart/{cart_item_id}` — удалить товар
 - `DELETE /api/v1/cart` — очистить корзину
 
+### Избранное
+- `GET /api/v1/wishlist` (alias `/api/v1/favorites`) — список с обогащением из B2B
+- `POST /api/v1/wishlist` (alias `/api/v1/favorites/{product_id}` через PUT в спеке) — добавить (201 / 200 при повторе)
+- `DELETE /api/v1/wishlist/{product_id}` (alias `/api/v1/favorites/{product_id}`) — удалить (204, идемпотентно)
+
 ### Заказы
 - `POST /api/v1/orders` — создать заказ
 - `GET /api/v1/orders` — список заказов
