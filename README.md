@@ -105,6 +105,10 @@ neomarket-b2c-service/
 - `POST /api/v1/wishlist` (alias `/api/v1/favorites/{product_id}` через PUT в спеке) — добавить (201 / 200 при повторе)
 - `DELETE /api/v1/wishlist/{product_id}` (alias `/api/v1/favorites/{product_id}`) — удалить (204, идемпотентно)
 
+### Подписки
+- `POST /api/v1/cart/subscribe` — подписаться на изменения SKU (201, 409 при дубликате, 400 при невалидном notify_on, 404 для неизвестного SKU)
+- `DELETE /api/v1/cart/subscribe/{sku_id}` — отписаться (204, идемпотентно)
+
 ### Заказы
 - `POST /api/v1/orders` — создать заказ
 - `GET /api/v1/orders` — список заказов
