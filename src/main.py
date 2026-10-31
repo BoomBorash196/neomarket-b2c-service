@@ -100,6 +100,7 @@ def create_app() -> FastAPI:
     # OpenAPI-documented path is `/api/v1/catalog/products?q=`.
     app.include_router(catalog.alias_router, prefix="/api/v1", tags=["Catalog"])
     app.include_router(home.router, prefix="/api/v1/home", tags=["Home"])
+    app.include_router(home.banner_events_router, prefix="/api/v1", tags=["Banners"])
     app.include_router(recommendations.router, prefix="/api/v1/recommendations", tags=["Recommendations"])
 
     @app.get("/health")
