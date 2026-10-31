@@ -6,7 +6,11 @@ Create Date: 2026-06-22
 
 Stores user subscriptions for product availability changes.
 One row per (user_id, sku_id) — notify_on is stored as a compact
-string to keep the MVP simple (see ADR in PR description).
+string to keep the MVP simple.
+
+Primary keys are uuid strings everywhere in the service (see
+``SubscriptionModel.subscription_id``); the previous ``Integer``
+primary key drifted from the ORM and broke inserts.
 """
 
 from alembic import op
@@ -21,15 +25,17 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "subscriptions",
-        sa.Column("subscription_id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("user_id", sa.String(64), nullable=False, index=True),
+        sa.Column("subscription_id", sa.String(64), nullable=False),
+        sa.Column("user_id", sa.String(64), nullable=False),
         sa.Column("sku_id", sa.String(64), nullable=False),
         sa.Column("notify_on", sa.String(32), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
         sa.PrimaryKeyConstraint("subscription_id"),
         sa.UniqueConstraint("user_id", "sku_id", name="uq_sub_user_sku"),
     )
+    op.create_index("ix_subscriptions_user_id", "subscriptions", ["user_id"])
 
 
 def downgrade() -> None:
+    op.drop_index("ix_subscriptions_user_id", table_name="subscriptions")
     op.drop_table("subscriptions")

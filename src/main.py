@@ -93,6 +93,7 @@ def create_app() -> FastAPI:
     app.include_router(cart.router, prefix="/api/v1/cart", tags=["Cart"])
     app.include_router(order.router, prefix="/api/v1/orders", tags=["Orders"])
     app.include_router(wishlist.router, prefix="/api/v1/wishlist", tags=["Wishlist"])
+    app.include_router(wishlist.router, prefix="/api/v1/favorites", tags=["Favorites"])
     app.include_router(subscriptions.router, prefix="/api/v1/cart", tags=["Cart"])
     app.include_router(catalog.router, prefix="/api/v1/catalog", tags=["Catalog"])
     # Undocumented alias for `GET /api/v1/products?search=`; the canonical,
