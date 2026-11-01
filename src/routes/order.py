@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +24,10 @@ from src.schemas import (
     PaymentMethodResponse,
 )
 from src.services.b2b_client import B2BClientError, b2b_client
+from src.services.order_cancel import (
+    attempt_unreserve,
+    mark_cancel_pending,
+)
 
 router = APIRouter()
 
@@ -507,8 +511,8 @@ async def get_order(
 # =====================================================================
 
 class CancelOrderRequest(BaseModel):
-    """Optional body for order cancellation."""
-    reason: Optional[str] = None
+    """Optional body for order cancellation (OpenAPI ``reason`` max 500)."""
+    reason: Optional[str] = Field(default=None, max_length=500)
 
 
 @router.post("/{order_id}/cancel", response_model=Order)
@@ -519,14 +523,16 @@ async def cancel_order(
     x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Cancel order if possible (CREATED or PAID status).
+    """Cancel an order in CREATED/PAID status.
 
-    Flow:
-      1. Check order exists and belongs to user (IDOR).
-      2. Check status is cancellable (CREATED, PAID only).
-      3. Attempt all-or-nothing unreserve via B2B.
-      4. If unreserve succeeds → CANCELLED.
-      5. If unreserve fails → CANCEL_PENDING (await async retry).
+    Canon flow ``b2c-11-cancel-order``:
+      1. Check the order exists and belongs to the buyer (IDOR) → else 404.
+      2. Only CREATED/PAID can be cancelled → else 409 CANCEL_NOT_ALLOWED.
+      3. Persist CANCEL_PENDING *before* calling B2B, so the intent survives
+         a crash/restart.
+      4. Call idempotent B2B unreserve:
+         - success → CANCELLED;
+         - failure → stay CANCEL_PENDING and schedule a backoff retry.
     """
     resolved_user_id = _resolve_user_id(x_user_id, user_id)
 
@@ -550,34 +556,14 @@ async def cancel_order(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "code": "CANCEL_NOT_ALLOWED",
-                "message": f"Cannot cancel order in {order.status} status",
+                "message": f"Cannot cancel order in {order.status.value} status",
                 "current_status": order.status.value,
             },
         )
 
-    # Release stock reservation (all-or-nothing)
-    order_items = await _load_order_items(db, order_id)
-
-    unreserve_ok = True
-    for item in order_items:
-        try:
-            await b2b_client.reserve_stock([
-                {"sku_id": item.sku_id, "quantity": -item.quantity}
-            ])
-        except B2BClientError:
-            unreserve_ok = False
-
-    if unreserve_ok:
-        order.status = OrderStatus.CANCELLED
-    else:
-        # Unreserve failed — mark as CANCEL_PENDING so async retry can finish.
-        order.status = OrderStatus.CANCEL_PENDING
-
-    if body and body.reason:
-        order.cancel_reason = body.reason
-
-    await db.commit()
-    await db.refresh(order)
+    # Accept the intent first: this row is what the retry worker picks up.
+    await mark_cancel_pending(db, order, body.reason if body else None)
+    await attempt_unreserve(db, order)
 
     items = await _load_order_items(db, order_id)
     return _order_to_schema(order, items)
@@ -596,9 +582,10 @@ async def cancel_order_retry(
 ):
     """Retry unreserve for an order stuck in CANCEL_PENDING.
 
-    Called by a background worker (scaffold: management command / Celery / cron).
-    If unreserve succeeds → CANCELLED.
-    If unreserve fails again → stays CANCEL_PENDING (logged for manual review).
+    This is the manual/worker trigger; the cron entrypoint
+    ``scripts/retry_cancel_pending.py`` processes all due orders. If
+    unreserve succeeds → CANCELLED, otherwise the order stays
+    CANCEL_PENDING with the next backoff timestamp.
     """
     resolved_user_id = _resolve_user_id(x_user_id, user_id)
 
@@ -622,27 +609,12 @@ async def cancel_order_retry(
             detail={
                 "code": "NOT_CANCEL_PENDING",
                 "message": (
-                    f"Order is in {order.status} status, not CANCEL_PENDING"
+                    f"Order is in {order.status.value} status, not CANCEL_PENDING"
                 ),
             },
         )
 
-    order_items = await _load_order_items(db, order_id)
-
-    unreserve_ok = True
-    for item in order_items:
-        try:
-            await b2b_client.reserve_stock([
-                {"sku_id": item.sku_id, "quantity": -item.quantity}
-            ])
-        except B2BClientError:
-            unreserve_ok = False
-
-    if unreserve_ok:
-        order.status = OrderStatus.CANCELLED
-
-    await db.commit()
-    await db.refresh(order)
+    await attempt_unreserve(db, order)
 
     items = await _load_order_items(db, order_id)
     return _order_to_schema(order, items)

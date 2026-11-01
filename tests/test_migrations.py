@@ -54,13 +54,16 @@ def test_alembic_upgrade_head_on_clean_database(tmp_path):
             "payment_method_id",
             "comment",
             "cancel_reason",
+            "cancel_retry_count",
+            "cancel_next_retry_at",
+            "cancel_last_error",
             "paid_at",
         } <= order_columns
 
         revision = conn.execute(
             "SELECT version_num FROM alembic_version"
         ).fetchone()[0]
-        assert revision == "006_add_order_checkout_fields"
+        assert revision == "007_add_cancel_retry_fields"
 
 
 def test_order_primary_keys_are_uuid_strings(tmp_path):
