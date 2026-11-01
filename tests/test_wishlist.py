@@ -271,6 +271,10 @@ async def test_get_empty_wishlist(client: TestClient):
     data = resp.json()
     assert data["items"] == []
     assert data["user_id"] == "user-new"
+    # OpenAPI PaginatedCatalogProducts envelope
+    assert data["total_count"] == 0
+    assert data["limit"] == 20
+    assert data["offset"] == 0
 
 
 # ======================================================================
@@ -331,5 +335,9 @@ async def test_add_to_wishlist_response_schema(client: TestClient):
     assert resp.status_code == 201
     data = resp.json()
     for key in ("wishlist_item_id", "user_id", "product_id", "product_title",
-                "main_image_url", "min_price", "is_available", "added_at"):
+                "main_image_url", "min_price", "is_available", "added_at",
+                "id", "name", "has_stock", "images"):
         assert key in data, f"Missing key: {key}"
+    assert data["id"] == data["product_id"]
+    assert data["name"] == data["product_title"]
+    assert data["has_stock"] is True
