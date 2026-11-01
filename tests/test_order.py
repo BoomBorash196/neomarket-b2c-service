@@ -73,13 +73,26 @@ async def test_checkout_creates_paid_order_with_fixed_prices(
     }
 
     response = client.post("/api/v1/orders", json=payload, headers={"Idempotency-Key": idem_key})
-    assert response.status_code == 200
+    assert response.status_code == 201
     data = response.json()
+
+    # OpenAPI OrderResponse required fields
+    for field in ("id", "buyer_id", "status", "items", "subtotal", "total", "address", "created_at"):
+        assert field in data, f"missing required field {field}"
+    assert data["id"] == data["order_id"]
+    assert data["buyer_id"] == user_id
+    assert data["subtotal"] == data["total"]
+    for required in ("country", "city", "street", "building", "id", "created_at"):
+        assert required in data["address"]
+    for item in data["items"]:
+        for required in ("sku_id", "product_id", "name", "quantity", "unit_price", "line_total"):
+            assert required in item
 
     # Order created with PAID status
     assert data["user_id"] == user_id
     assert data["status"] == OrderStatus.PAID.value
     assert data["total_amount"] == 4500.0  # 1000*2 + 2500*1
+    assert data["total"] == 4500
     assert len(data["items"]) == 2
 
     # Fixed snapshot prices in OrderItem
@@ -172,12 +185,12 @@ async def test_idempotency_returns_existing_order(
 
     # First call
     r1 = client.post("/api/v1/orders", json=payload, headers={"Idempotency-Key": idem_key})
-    assert r1.status_code == 200
+    assert r1.status_code == 201
     order_id_1 = r1.json()["order_id"]
 
     # Second call with same key — should return the same order (idempotent)
     r2 = client.post("/api/v1/orders", json=payload, headers={"Idempotency-Key": idem_key})
-    assert r2.status_code == 200
+    assert r2.status_code == 201
     order_id_2 = r2.json()["order_id"]
 
     # Same order returned — key proof of idempotency
@@ -272,3 +285,85 @@ async def test_get_order_with_items(
     assert len(data["items"]) == 1
     assert data["items"][0]["sku_name"] == "SKU g1"
     assert data["items"][0]["unit_price"] == 1000.0
+
+
+# =====================================================================
+# 7. idempotency_key_reused_with_different_body_returns_409
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_idempotency_key_reused_with_different_body_returns_409(
+    client: TestClient, db_session
+):
+    """Same key + different body → 409 IDEMPOTENCY_KEY_REUSED."""
+    user_id = "test_user_idem_mismatch"
+    sku_id = "sku-idem-mismatch"
+    idem_key = "idem-mismatch-001"
+
+    db_session.add(_mock_cart_item(user_id, sku_id, quantity=1))
+    await db_session.commit()
+
+    b2b_client.get_skus_by_ids = AsyncMock(
+        return_value={sku_id: _mock_sku(sku_id, price=100.0)}
+    )
+    b2b_client.reserve_stock = AsyncMock(return_value=_mock_reserve_success())
+
+    r1 = client.post(
+        "/api/v1/orders",
+        json={"user_id": user_id, "comment": "first"},
+        headers={"Idempotency-Key": idem_key},
+    )
+    assert r1.status_code == 201
+
+    r2 = client.post(
+        "/api/v1/orders",
+        json={"user_id": user_id, "comment": "second"},
+        headers={"Idempotency-Key": idem_key},
+    )
+    assert r2.status_code == 409
+    assert r2.json()["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
+# =====================================================================
+# 8. get_orders_returns_paginated_history
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_get_orders_returns_paginated_history(
+    client: TestClient, db_session
+):
+    """GET /orders returns the OpenAPI PaginatedOrders envelope."""
+    user_id = "test_user_history"
+    order = OrderModel(user_id=user_id, status=OrderStatus.PAID, total_amount=100.0)
+    db_session.add(order)
+    await db_session.commit()
+
+    response = client.get(
+        "/api/v1/orders?limit=10&offset=0",
+        headers={"X-User-Id": user_id},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    for field in ("items", "total_count", "limit", "offset"):
+        assert field in data
+    assert data["total_count"] == 1
+    assert data["limit"] == 10
+    assert data["offset"] == 0
+    assert data["items"][0]["buyer_id"] == user_id
+
+
+# =====================================================================
+# 9. checkout_without_identity_returns_401
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_checkout_without_identity_returns_401(client: TestClient):
+    """No X-User-Id and no legacy user_id → 401."""
+    response = client.post(
+        "/api/v1/orders",
+        json={},
+        headers={"Idempotency-Key": "idem-no-user"},
+    )
+    assert response.status_code == 401
+    assert response.json()["code"] == "UNAUTHORIZED"
+

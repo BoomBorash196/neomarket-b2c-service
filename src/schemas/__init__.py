@@ -1,6 +1,6 @@
 """Pydantic schemas for request/response validation."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, List
 from datetime import datetime
 from enum import Enum
@@ -75,7 +75,13 @@ class CartItemCreate(BaseModel):
 
 
 class CartItem(BaseModel):
-    """Cart item with product details."""
+    """Cart item with product details.
+
+    OpenAPI ``CartItem`` requires ``sku_id``, ``product_id``, ``name``,
+    ``quantity``, ``unit_price``, ``line_total``, ``available_quantity``,
+    ``is_available``. Legacy fields (``cart_item_id``, ``product_title``,
+    ``sku_info``, ``subtotal``) are kept for older clients.
+    """
     cart_item_id: str
     sku_id: str
     product_id: str
@@ -83,6 +89,14 @@ class CartItem(BaseModel):
     sku_info: SKUInfo
     quantity: int
     subtotal: float
+    name: str = ""
+    unit_price: int = 0
+    line_total: int = 0
+    available_quantity: int = 0
+    is_available: bool = True
+    sku_code: Optional[str] = None
+    unit_price_at_add: Optional[int] = None
+    image: Optional[ImageRef] = None
 
 
 class Cart(BaseModel):
@@ -91,6 +105,11 @@ class Cart(BaseModel):
     items: List[CartItem]
     total_items: int
     total_amount: float
+    id: Optional[str] = None
+    items_count: int = 0
+    subtotal: float = 0.0
+    is_valid: bool = True
+    updated_at: Optional[datetime] = None
 
 
 class UnavailableCartItem(BaseModel):
@@ -116,42 +135,127 @@ class CartWithUnavailable(BaseModel):
     total_items: int
     total_amount: float
     unavailable: List[UnavailableCartItem] = []
+    id: Optional[str] = None
+    items_count: int = 0
+    subtotal: float = 0.0
+    is_valid: bool = True
+    updated_at: Optional[datetime] = None
 
 
 # --- Order schemas ---
+class AddressResponse(BaseModel):
+    """Shipping address snapshot on an order (OpenAPI ``AddressResponse``).
+
+    ``country/city/street/building`` are required by the contract; the rest
+    are optional. Checkout stores only ``address_id``, so absent fields are
+    synthesised from it.
+    """
+    id: str
+    country: str
+    city: str
+    street: str
+    building: str
+    created_at: datetime
+    region: Optional[str] = None
+    apartment: Optional[str] = None
+    postal_code: Optional[str] = None
+    recipient_name: Optional[str] = None
+    recipient_phone: Optional[str] = None
+    is_default: bool = False
+    comment: Optional[str] = None
+
+
+class PaymentMethodResponse(BaseModel):
+    """Mock payment method snapshot (OpenAPI ``PaymentMethodResponse``)."""
+    id: str
+    type: str
+    created_at: datetime
+    card_last4: Optional[str] = None
+    card_brand: Optional[str] = None
+    is_default: bool = False
+
+
+class OrderStatusEntry(BaseModel):
+    """One entry of an order status history."""
+    status: OrderStatus
+    changed_at: datetime
+    reason: Optional[str] = None
+
+
+class OrderSnapshotItem(BaseModel):
+    """Optional client-side cart snapshot used to detect races."""
+    sku_id: str
+    quantity: int = Field(ge=1)
+    unit_price: int = Field(ge=0)
+
+
 class OrderCreate(BaseModel):
-    """Create order from cart — no items/total needed; server computes from B2B."""
-    user_id: str
+    """Checkout request (OpenAPI ``OrderCreateRequest``).
+
+    ``address_id`` / ``payment_method_id`` are the contract fields.
+    ``user_id`` is accepted for backwards compatibility with callers that do
+    not send the trusted ``X-User-Id`` header.
+    """
+    address_id: Optional[str] = None
+    payment_method_id: Optional[str] = None
+    comment: Optional[str] = None
+    items_snapshot: Optional[List[OrderSnapshotItem]] = None
+    user_id: Optional[str] = None
 
 
 class OrderItem(BaseModel):
-    """Order item details — historical snapshot at purchase time."""
+    """Order item details — historical snapshot at purchase time.
+
+    Carries both the OpenAPI-required fields (``name``, ``line_total``) and
+    the legacy aliases (``sku_name``, ``product_title``) used by older clients.
+    """
     order_item_id: str
     order_id: str
     sku_id: str
-    sku_name: str
     product_id: str
+    name: str
+    sku_name: str
     product_title: str
     quantity: int
-    unit_price: float
+    unit_price: int
+    line_total: int
 
 
 class Order(BaseModel):
-    """Order with status and items."""
+    """Order with status and items.
+
+    All OpenAPI ``OrderResponse`` required fields are present: ``id``,
+    ``buyer_id``, ``status``, ``items``, ``subtotal``, ``total``, ``address``,
+    ``created_at``. Legacy fields (``order_id``, ``user_id``, ``total_amount``)
+    stay for compatibility.
+    """
+    id: str
     order_id: str
+    number: Optional[str] = None
+    buyer_id: str
     user_id: str
     status: OrderStatus
-    total_amount: float
-    created_at: datetime
     items: List[OrderItem]
+    subtotal: int
+    delivery_cost: int = 0
+    total: int
+    total_amount: float
+    address: AddressResponse
+    payment_method: Optional[PaymentMethodResponse] = None
+    comment: Optional[str] = None
+    cancel_reason: Optional[str] = None
+    status_history: List[OrderStatusEntry] = []
+    created_at: datetime
+    paid_at: Optional[datetime] = None
+    delivered_at: Optional[datetime] = None
 
 
 class OrderList(BaseModel):
-    """Paginated order list."""
-    orders: List[Order]
-    total: int
-    page: int
-    page_size: int
+    """Paginated order list (OpenAPI ``PaginatedOrders``)."""
+    items: List[Order]
+    total_count: int
+    limit: int
+    offset: int
 
 
 # --- Wishlist schemas ---
@@ -161,7 +265,12 @@ class WishlistItemCreate(BaseModel):
 
 
 class WishlistItem(BaseModel):
-    """Wishlist item with product info."""
+    """Wishlist item with product info.
+
+    OpenAPI ``PaginatedCatalogProducts`` items are ``CatalogProductCard``:
+    ``id``, ``name``, ``min_price``, ``has_stock``, ``images`` are required.
+    Legacy wishlist fields are kept and mirrored into the contract fields.
+    """
     wishlist_item_id: str
     user_id: str
     product_id: str
@@ -170,12 +279,32 @@ class WishlistItem(BaseModel):
     min_price: float
     is_available: bool
     added_at: datetime
+    id: str = ""
+    name: str = ""
+    has_stock: bool = False
+    images: List[ImageRef] = []
+
+    @model_validator(mode="after")
+    def _fill_contract_fields(self):
+        if not self.id:
+            self.id = self.product_id
+        if not self.name:
+            self.name = self.product_title
+        self.has_stock = self.is_available
+        if not self.images and self.main_image_url:
+            self.images = [
+                ImageRef(id=self.product_id, url=self.main_image_url, ordering=0)
+            ]
+        return self
 
 
 class Wishlist(BaseModel):
-    """User wishlist."""
+    """User wishlist (OpenAPI ``PaginatedCatalogProducts`` envelope)."""
     user_id: str
     items: List[WishlistItem]
+    total_count: int = 0
+    limit: int = 20
+    offset: int = 0
 
 
 # --- Subscription schemas ---
@@ -224,15 +353,37 @@ class CategoryTreeNode(CategoryRef):
 
 # --- Collection/Banner schemas ---
 class Banner(BaseModel):
-    """Promotional banner."""
+    """Promotional banner.
+
+    OpenAPI ``Banner`` requires ``id``, ``image_url`` and ``link``; the
+    legacy names (``banner_id``, ``link_url``, ``priority``, ``is_active``)
+    are kept for the existing home-page clients.
+    """
     banner_id: str
     title: str
     image_url: str
-    link_url: str
+    link_url: str = ""
     priority: int
     is_active: bool
     starts_at: Optional[datetime] = None
     ends_at: Optional[datetime] = None
+    id: str = ""
+    link: str = ""
+    ordering: int = 0
+    active_from: Optional[datetime] = None
+    active_to: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def _fill_contract_fields(self):
+        if not self.id:
+            self.id = self.banner_id
+        self.link_url = self.link_url or ""
+        if not self.link:
+            self.link = self.link_url
+        self.ordering = self.priority
+        self.active_from = self.starts_at
+        self.active_to = self.ends_at
+        return self
 
 
 class BannerClickCreate(BaseModel):
@@ -242,21 +393,51 @@ class BannerClickCreate(BaseModel):
 
 
 class CollectionProduct(BaseModel):
-    """Product in a collection."""
+    """Product in a collection (OpenAPI ``CatalogProductCard`` required fields)."""
     product_id: str
     title: str
     main_image_url: str
     min_price: float
+    id: str = ""
+    name: str = ""
+    has_stock: bool = True
+    images: List[ImageRef] = []
+
+    @model_validator(mode="after")
+    def _fill_contract_fields(self):
+        if not self.id:
+            self.id = self.product_id
+        if not self.name:
+            self.name = self.title
+        if not self.images and self.main_image_url:
+            self.images = [
+                ImageRef(id=self.product_id, url=self.main_image_url, ordering=0)
+            ]
+        return self
 
 
 class Collection(BaseModel):
-    """Product collection (e.g., "Hit of the season")."""
+    """Product collection (e.g., "Hit of the season").
+
+    OpenAPI ``Collection`` requires ``id``, ``name`` and ``products``; legacy
+    ``collection_id`` / ``title`` are kept.
+    """
     collection_id: str
     title: str
     description: Optional[str] = None
     products: List[CollectionProduct]
     max_display: int = 8
-    unavailable_ids: List[str] = []  # product_ids unavailable in B2B
+    unavailable_ids: List[str] = []
+    id: str = ""
+    name: str = ""
+
+    @model_validator(mode="after")
+    def _fill_contract_fields(self):
+        if not self.id:
+            self.id = self.collection_id
+        if not self.name:
+            self.name = self.title
+        return self
 
 
 # --- Filter / Facet schemas ---

@@ -151,6 +151,10 @@ async def test_get_cart_enriched_with_b2b_data(
     data = response.json()
     assert data["total_items"] == 1
     assert data["total_amount"] == 2500.0 * 3  # price * quantity
+    # OpenAPI CartResponse required fields
+    assert data["items_count"] == 1
+    assert data["subtotal"] == 2500.0 * 3
+    assert data["is_valid"] is True
     assert len(data["items"]) == 1
     item = data["items"][0]
     assert item["sku_id"] == sku_id
@@ -158,6 +162,12 @@ async def test_get_cart_enriched_with_b2b_data(
     assert item["product_title"] == "Enriched Product"
     assert item["quantity"] == 3
     assert item["subtotal"] == 7500.0
+    # OpenAPI CartItem required fields
+    assert item["name"] == "Enriched Product"
+    assert item["unit_price"] == 2500
+    assert item["line_total"] == 7500
+    assert item["available_quantity"] == 10
+    assert item["is_available"] is True
     assert data["unavailable"] == []
 
 
@@ -288,6 +298,12 @@ async def test_idor_protection_cart_access(
     data = response.json()
     assert data["items"] == []
     assert data["total_items"] == 0
+    assert data["items_count"] == 0
+    assert data["subtotal"] == 0
+    # Required OpenAPI field must be present; the cart has an unavailable item,
+    # so it is not valid, but it is still excluded from the totals above.
+    assert "is_valid" in data
+    assert data["is_valid"] is False
 
     # User A tries to DELETE B's cart item
     response = client.delete(f"/api/v1/cart/items/sku-secret?user_id={user_a}")

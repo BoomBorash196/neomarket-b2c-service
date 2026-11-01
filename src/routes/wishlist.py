@@ -4,7 +4,7 @@ Secure identity: user_id comes ONLY from X-User-Id header (JWT proxy).
 Query/body user_id is ALWAYS ignored to prevent IDOR.
 """
 
-from fastapi import Response, APIRouter, Depends, HTTPException, status, Header
+from fastapi import Response, APIRouter, Depends, HTTPException, Query, status, Header
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
@@ -49,12 +49,15 @@ async def get_current_user_id(
 
 @router.get("", response_model=Wishlist)
 async def get_wishlist(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
     """Get user's wishlist with B2B-enriched product details.
 
     Blocked/deleted products from B2B are excluded from the response.
+    Returns the OpenAPI ``PaginatedCatalogProducts`` envelope.
     """
     result = await db.execute(
         select(WishlistItemModel).where(
@@ -64,7 +67,13 @@ async def get_wishlist(
     wishlist_items = result.scalars().all()
 
     if not wishlist_items:
-        return Wishlist(user_id=user_id, items=[])
+        return Wishlist(
+            user_id=user_id,
+            items=[],
+            total_count=0,
+            limit=limit,
+            offset=offset,
+        )
 
     items: List[WishlistItem] = []
     for item in wishlist_items:
@@ -83,7 +92,15 @@ async def get_wishlist(
             added_at=item.created_at,
         ))
 
-    return Wishlist(user_id=user_id, items=items)
+    total_count = len(items)
+    page = items[offset:offset + limit]
+    return Wishlist(
+        user_id=user_id,
+        items=page,
+        total_count=total_count,
+        limit=limit,
+        offset=offset,
+    )
 
 
 # =====================================================================

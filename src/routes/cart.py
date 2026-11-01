@@ -81,6 +81,11 @@ def _enrich_cart_items(
             ),
             "quantity": ci.quantity,
             "subtotal": sku_info["price"] * ci.quantity,
+            "name": sku_info.get("product_title", ""),
+            "unit_price": int(round(sku_info["price"])),
+            "line_total": int(round(sku_info["price"] * ci.quantity)),
+            "available_quantity": qty_available,
+            "is_available": True,
         })
 
     return available, unavailable
@@ -102,6 +107,10 @@ def _build_cart_response(
         total_items=total_items,
         total_amount=total_amount,
         unavailable=unavailable,
+        id=user_id,
+        items_count=total_items,
+        subtotal=total_amount,
+        is_valid=len(unavailable) == 0,
     )
 
 
