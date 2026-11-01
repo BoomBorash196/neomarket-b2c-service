@@ -367,5 +367,21 @@ class B2BClient:
         except B2BClientError as exc:
             raise exc
 
+    async def unreserve_order(self, order_id: str, items: list[dict]) -> dict:
+        """Release a previously reserved order (idempotent by ``order_id``).
+
+        Uses the dedicated B2B ``POST /inventory/unreserve`` endpoint instead
+        of negative reserve quantities: the order id makes retries safe and
+        lets B2B release the whole reservation atomically.
+
+        ``items`` is ``[{"sku_id": ..., "quantity": ...}, ...]`` with positive
+        quantities.
+        """
+        return await self._request(
+            "POST",
+            "/inventory/unreserve",
+            json_body={"order_id": order_id, "items": items},
+        )
+
 
 b2b_client = B2BClient()

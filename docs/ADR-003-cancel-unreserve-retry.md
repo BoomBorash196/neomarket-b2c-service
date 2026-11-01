@@ -2,54 +2,66 @@
 
 ## Context
 
-When a customer cancels an order, we call B2B `reserve_stock` with negative quantities to release stock reservations. If B2B is unavailable (5xx), we cannot release stock synchronously. The order must not block — customer should see immediate feedback, but stock must eventually be released.
+When a buyer cancels an order, B2C calls the B2B `POST /inventory/unreserve`
+endpoint to release the stock reservation. If B2B is unavailable (5xx), the
+buyer must still get an immediate `CANCEL_PENDING` answer — the cancellation
+intent cannot be lost. The order is persisted as `CANCEL_PENDING` *before* the
+B2B call, and a background worker retries the release until it succeeds.
 
 ## Options Considered
 
-### Option 1: Celery Task with Exponential Backoff
-Decouple unreserve into a Celery task. On cancel failure, enqueue a task with `retry=True`, exponential backoff (`on_failure` logs for manual review).
+### Option 1: Celery task with exponential backoff
+Decouple unreserve into a Celery task, enqueued on every cancel attempt, with
+`autoretry_for`, exponential backoff and a dead-letter path.
 
-**Pros:**
-- Built-in retry, backoff, dead-letter queue
-- Industry standard for Python/FastAPI
+**Pros:** built-in retry/backoff, worker isolation, industry standard.
 
-**Cons:**
-- Requires Redis/RabbitMQ infrastructure
-- Adds deployment complexity (Celery worker process)
-- Overkill for current scale (single service, no queue infrastructure)
+**Cons:** requires Redis/RabbitMQ plus a separate Celery worker deployment;
+more moving parts to configure and monitor.
 
-### Option 2: Management Command (Cron / Periodic)
-Run a periodic management command (every 5 min) that scans `CANCEL_PENDING` orders and retries unreserve.
+### Option 2: Management command (cron) with DB-persisted backoff (chosen)
+A periodic CLI command scans `orders` for due `CANCEL_PENDING` rows and calls
+B2B unreserve.
 
-**Pros:**
-- Zero infrastructure — uses existing service deployment
-- Simple to implement: one CLI command + cron entry
-- Easy to reason about: every pending order gets retried on each run
+**Pros:** zero new infrastructure; runs with the existing service deployment;
+retry state (`cancel_retry_count`, `cancel_next_retry_at`, `cancel_last_error`)
+lives in the database, so a service restart cannot lose pending work.
 
-**Cons:**
-- No per-order retry delay — all pending orders retried at fixed interval
-- No dead-letter queue for repeated failures (needs manual age-based fallback)
+**Cons:** cron must be configured; no dead-letter queue (the last error and
+attempt count are stored on the order for manual review).
 
 ### Option 3: Django Q
-Similar to Celery but Django-native.
+Django-native ORM task queue with retry support.
 
-**Pros:**
-- ORM-based task storage, no external broker needed
+**Pros:** task state is stored in the DB, no external broker.
 
-**Cons:**
-- Project is FastAPI + SQLAlchemy, not Django
-- Adding Django dependency is a mismatch with the stack
+**Cons:** the project is FastAPI + SQLAlchemy, not Django; adding Django just
+for the queue is a stack mismatch.
 
 ## Decision
 
-**Chose Option 2: Management Command.**
+**Chose Option 2: management command by cron.**
 
 **Criteria:**
-1. **Simplicity of setup** — zero new infrastructure, works with existing deployment.
-2. **Guarantee of execution on restart** — cron runs regardless of service state; if the service is up, the command runs within the interval.
+1. **Simplicity of setup** — no broker or extra worker process; one cron line
+   and the existing database.
+2. **Guarantee of execution on restart** — the intent and the next retry
+   timestamp are committed to `orders` before the B2B call. After a restart,
+   the next cron run picks up every due order; Celery would additionally need
+   a durable broker and worker supervision.
 
-**Implementation:**
-- `POST /cancel` on B2B failure sets order status to `CANCEL_PENDING` (no exception to user).
-- `POST /cancel-retry` endpoint for manual/background retry.
-- A management command (`python -m src.commands.retry_cancel_pending`) scans for `CANCEL_PENDING` orders older than N minutes and retries unreserve.
-- Scaffold in v1: log the error + leave order in `CANCEL_PENDING` without automatic retry. The `cancel-retry` endpoint exists for manual invocation.
+## Implementation
+
+- `POST /api/v1/orders/{id}/cancel`: validates the status, persists
+  `CANCEL_PENDING`, then calls B2B `POST /inventory/unreserve`. Success →
+  `CANCELLED`; failure → stays `CANCEL_PENDING`, increments
+  `cancel_retry_count`, stores `cancel_last_error`, and sets
+  `cancel_next_retry_at` with exponential backoff (1 min → 2 → 4 … capped at
+  1 hour).
+- `POST /api/v1/orders/{id}/cancel-retry`: manual/worker trigger for one
+  order.
+- `python -m src.workers.retry_cancel_pending --limit 100`: cron entrypoint
+  that processes all due `CANCEL_PENDING` orders. B2B unreserve is idempotent
+  by `order_id`, so concurrent runs are safe.
+- Allowed cancellation statuses are `CREATED` and `PAID`; anything else
+  returns `409 CANCEL_NOT_ALLOWED` with `current_status`.
