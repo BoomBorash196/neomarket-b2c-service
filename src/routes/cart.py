@@ -1,23 +1,55 @@
 """Cart routes — B2C shopping cart with guest/auth merge, B2B enrichment, unavailable reason."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Header, status
+from datetime import datetime, timezone
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
-from typing import Optional, List
 
 from src.database import get_db
 from src.models import CartItemModel
 from src.schemas import (
     CartItemCreate,
+    CartItemUpdate,
     CartItem,
     Cart,
+    CartResponse,
     SKUInfo,
     UnavailableCartItem,
     CartWithUnavailable,
+    CartValidationIssue,
+    CartValidationResponse,
 )
 from src.services.b2b_client import b2b_client, B2BClientError
 
 router = APIRouter()
+
+
+async def get_current_user_id(
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+) -> str:
+    """Resolve the authenticated buyer from the trusted ``X-User-Id`` header."""
+    if not x_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "MISSING_AUTH", "message": "X-User-Id header required"},
+        )
+    return x_user_id
+
+
+async def get_cart_owner(
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    x_session_id: Optional[str] = Header(None, alias="X-Session-Id"),
+) -> str:
+    """Resolve the current buyer: authenticated ``X-User-Id`` or guest ``X-Session-Id``."""
+    owner = x_user_id or x_session_id
+    if not owner:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "MISSING_AUTH", "message": "X-User-Id or X-Session-Id header required"},
+        )
+    return owner
 
 
 # =====================================================================
@@ -30,62 +62,64 @@ def _enrich_cart_items(
 ) -> tuple[list[dict], list[dict]]:
     """Enrich cart items with B2B data.
 
-    Returns (available_items, unavailable_items) where unavailable_items
-    carry unavailable_reason.  Unavailable items do NOT contribute to total.
+    Returns ``(available_items, unavailable_items)``. Unavailable items carry
+    ``unavailable_reason`` and never contribute to totals. The reason is always
+    computed live from B2B — it is never stored on the cart row.
     """
-    available = []
-    unavailable = []
+    available: list[dict] = []
+    unavailable: list[dict] = []
 
     for ci in cart_items:
         sku_info = skus_data.get(ci.sku_id)
         if not sku_info:
             unavailable.append({
-                "cart_item_id": ci.cart_item_id,
-                "sku_id": ci.sku_id,
-                "quantity": ci.quantity,
-                "product_id": sku_info.get("product_id", "") if sku_info else "",
-                "product_title": sku_info.get("product_title", f"SKU {ci.sku_id}") if sku_info else f"SKU {ci.sku_id}",
-                "price": sku_info.get("price", 0.0) if sku_info else 0.0,
+                "cart_item_id": str(ci.cart_item_id),
+                "sku_id": str(ci.sku_id),
+                "quantity": int(ci.quantity),
+                "product_id": "",
+                "product_title": f"SKU {ci.sku_id}",
+                "price": 0.0,
                 "unavailable_reason": "sku_not_found",
             })
             continue
 
-        is_active = sku_info.get("is_active", False)
-        qty_available = sku_info.get("quantity_available", 0)
+        sku_id = str(ci.sku_id)
+        price = float(sku_info.get("price") or 0)
+        discount = float(sku_info.get("discount") or 0)
+        unit_price = int(round(price - discount))
+        line_total = unit_price * int(ci.quantity)
+
+        qty_available = int(
+            sku_info.get("active_quantity")
+            or sku_info.get("quantity_available")
+            or sku_info.get("stock_quantity")
+            or 0
+        )
+        is_active = bool(sku_info.get("is_active", qty_available > 0))
 
         if not is_active or qty_available <= 0:
-            reason = "not_active" if not is_active else "out_of_stock"
             unavailable.append({
-                "cart_item_id": ci.cart_item_id,
-                "sku_id": ci.sku_id,
-                "quantity": ci.quantity,
-                "product_id": sku_info.get("product_id", ""),
-                "product_title": sku_info.get("product_title", ""),
-                "price": sku_info.get("price", 0.0),
-                "unavailable_reason": reason,
+                "cart_item_id": str(ci.cart_item_id),
+                "sku_id": sku_id,
+                "quantity": int(ci.quantity),
+                "product_id": str(sku_info.get("product_id") or ""),
+                "product_title": str(sku_info.get("name") or sku_info.get("product_title") or f"SKU {sku_id}"),
+                "price": price,
+                "unavailable_reason": "not_active" if not is_active else "out_of_stock",
             })
             continue
 
         available.append({
-            "cart_item_id": ci.cart_item_id,
-            "sku_id": ci.sku_id,
-            "product_id": sku_info.get("product_id", ""),
-            "product_title": sku_info.get("product_title", ""),
-            "sku_info": SKUInfo(
-                id=ci.sku_id,
-                price=sku_info["price"],
-                available_quantity=qty_available,
-                is_active=is_active,
-                in_stock=True,
-                discount=sku_info.get("discount", 0.0),
-            ),
-            "quantity": ci.quantity,
-            "subtotal": sku_info["price"] * ci.quantity,
-            "name": sku_info.get("product_title", ""),
-            "unit_price": int(round(sku_info["price"])),
-            "line_total": int(round(sku_info["price"] * ci.quantity)),
+            "cart_item_id": str(ci.cart_item_id),
+            "sku_id": sku_id,
+            "product_id": str(sku_info.get("product_id") or ""),
+            "name": str(sku_info.get("name") or sku_info.get("product_title") or f"SKU {sku_id}"),
+            "quantity": int(ci.quantity),
+            "unit_price": unit_price,
+            "line_total": line_total,
             "available_quantity": qty_available,
             "is_available": True,
+            "subtotal": float(line_total),
         })
 
     return available, unavailable
@@ -96,10 +130,14 @@ def _build_cart_response(
     available: list[dict],
     unavailable: list[dict],
 ) -> CartWithUnavailable:
-    """Build final cart response."""
-    items = [CartItem(**a) for a in available]
-    total_items = len(items)
-    total_amount = sum(a["subtotal"] for a in available)
+    """Build the final cart response.
+
+    ``items_count`` and ``total_items`` are the sum of quantities for available
+    lines; unavailable lines are listed separately and excluded from totals.
+    """
+    items = [CartItem(**item) for item in available]
+    total_items = sum(int(item.get("quantity") or 0) for item in available)
+    total_amount = sum(float(item.get("subtotal") or 0.0) for item in available)
 
     return CartWithUnavailable(
         user_id=user_id,
@@ -111,6 +149,7 @@ def _build_cart_response(
         items_count=total_items,
         subtotal=total_amount,
         is_valid=len(unavailable) == 0,
+        updated_at=datetime.now(timezone.utc),
     )
 
 
@@ -120,13 +159,14 @@ def _build_cart_response(
 
 @router.get("", response_model=CartWithUnavailable)
 async def get_cart(
-    user_id: str = Query(..., description="User ID or guest session ID"),
+    user_id: str = Depends(get_cart_owner),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get user's shopping cart enriched with B2B data.
+    """Get the buyer's cart enriched with B2B data.
 
-    unavailable_reason is computed live from B2B — never stored in DB.
-    Unavailable items are shown but excluded from total_amount.
+    The owner is either the authenticated buyer (``X-User-Id``) or a guest
+    (``X-Session-Id``). Unavailable reasons are computed live from B2B and never
+    stored in the cart.
     """
     result = await db.execute(
         select(CartItemModel).where(CartItemModel.user_id == user_id)
@@ -141,8 +181,8 @@ async def get_cart(
         skus_data = await b2b_client.get_skus_by_ids(sku_ids)
     except B2BClientError:
         raise HTTPException(
-            status_code=502,
-            detail={"error": "B2B_UNAVAILABLE", "message": "Cannot enrich cart"},
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": "Cannot enrich cart"},
         )
 
     available, unavailable = _enrich_cart_items(cart_items, skus_data)
@@ -156,55 +196,60 @@ async def get_cart(
 @router.post("/items", response_model=CartWithUnavailable)
 async def add_to_cart(
     item: CartItemCreate,
-    user_id: str = Query(..., description="User ID or guest session ID"),
+    user_id: str = Depends(get_cart_owner),
     db: AsyncSession = Depends(get_db),
 ):
-    """Add item to cart. Increments quantity if SKU already present.
+    """Add an item to the cart.
 
-    Does NOT reserve stock — only checkout reserves.
+    Repeating an SKU increments quantity. Stock is not reserved here — checkout
+    performs lazy reservation.
     """
-    # Validate SKU exists and is active via B2B
     try:
         sku_data = await b2b_client.get_sku_by_id(item.sku_id)
     except B2BClientError:
         raise HTTPException(
-            status_code=502,
+            status_code=status.HTTP_502_BAD_GATEWAY,
             detail={"code": "B2B_UNAVAILABLE", "message": "Cannot validate SKU"},
         )
 
     if not sku_data:
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "SKU_NOT_FOUND", "message": f"SKU {item.sku_id} not found"},
         )
 
-    if not sku_data.get("is_active"):
+    qty_available = int(
+        sku_data.get("active_quantity")
+        or sku_data.get("quantity_available")
+        or sku_data.get("stock_quantity")
+        or 0
+    )
+    is_active = bool(sku_data.get("is_active", qty_available > 0))
+
+    if not is_active:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "SKU_NOT_ACTIVE", "message": f"SKU {item.sku_id} is not available"},
         )
 
-    qty_available = sku_data.get("quantity_available", 0)
     if qty_available <= 0:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "SKU_OUT_OF_STOCK", "message": f"SKU {item.sku_id} is out of stock"},
         )
 
-    # Check if already in cart — increment quantity
     existing = await db.execute(
         select(CartItemModel).where(
-            (CartItemModel.user_id == user_id) &
-            (CartItemModel.sku_id == item.sku_id)
+            (CartItemModel.user_id == user_id) & (CartItemModel.sku_id == item.sku_id)
         )
     )
     existing_item = existing.scalar_one_or_none()
 
     if existing_item:
-        new_qty = existing_item.quantity + item.quantity
+        new_qty = int(existing_item.quantity) + int(item.quantity)
         if new_qty > qty_available:
             raise HTTPException(
-                status_code=400,
+                status_code=status.HTTP_409_CONFLICT,
                 detail={
                     "code": "QUANTITY_EXCEEDED",
                     "message": f"Total quantity {new_qty} exceeds available {qty_available}",
@@ -212,29 +257,77 @@ async def add_to_cart(
             )
         existing_item.quantity = new_qty
     else:
-        new_item = CartItemModel(
-            user_id=user_id,
-            sku_id=item.sku_id,
-            quantity=item.quantity,
+        db.add(
+            CartItemModel(
+                user_id=user_id,
+                sku_id=item.sku_id,
+                quantity=int(item.quantity),
+            )
         )
-        db.add(new_item)
 
     await db.commit()
 
-    # Refresh and return full cart
     if existing_item:
         await db.refresh(existing_item)
     else:
-        new_item_loaded = await db.execute(
+        result = await db.execute(
             select(CartItemModel).where(
-                (CartItemModel.user_id == user_id) &
-                (CartItemModel.sku_id == item.sku_id)
+                (CartItemModel.user_id == user_id) & (CartItemModel.sku_id == item.sku_id)
             )
         )
-        new_item_loaded = new_item_loaded.scalar_one()
-        await db.refresh(new_item_loaded)
+        new_item = result.scalar_one()
+        await db.refresh(new_item)
 
     return await get_cart(user_id=user_id, db=db)
+
+
+# =====================================================================
+# POST /api/v1/cart/validate
+# =====================================================================
+
+@router.post("/validate", response_model=CartValidationResponse)
+async def validate_cart(
+    user_id: str = Depends(get_cart_owner),
+    db: AsyncSession = Depends(get_db),
+):
+    """Validate the current cart against B2B and return issues."""
+    result = await db.execute(
+        select(CartItemModel).where(CartItemModel.user_id == user_id)
+    )
+    cart_items = result.scalars().all()
+
+    sku_ids = [item.sku_id for item in cart_items]
+    try:
+        skus_data = await b2b_client.get_skus_by_ids(sku_ids)
+    except B2BClientError:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": "Cannot validate cart"},
+        )
+
+    available, unavailable = _enrich_cart_items(cart_items, skus_data)
+    issues: List[CartValidationIssue] = []
+
+    for item in unavailable:
+        reason = item.get("unavailable_reason")
+        if reason == "out_of_stock":
+            issue_type = "OUT_OF_STOCK"
+        elif reason == "not_active":
+            issue_type = "PRODUCT_BLOCKED"
+        elif reason == "sku_not_found":
+            issue_type = "PRODUCT_DELETED"
+        else:
+            issue_type = "OUT_OF_STOCK"
+        issues.append(
+            CartValidationIssue(
+                sku_id=item["sku_id"],
+                type=issue_type,
+                message=f"SKU {item['sku_id']} is unavailable: {reason}",
+            )
+        )
+
+    cart = _build_cart_response(user_id, available, unavailable)
+    return CartValidationResponse(is_valid=cart.is_valid, cart=cart, issues=issues)
 
 
 # =====================================================================
@@ -244,51 +337,54 @@ async def add_to_cart(
 @router.patch("/items/{sku_id}", response_model=CartWithUnavailable)
 async def update_cart_item(
     sku_id: str,
-    quantity: int = Query(..., ge=1, description="New quantity"),
-    user_id: str = Query(..., description="User ID or guest session ID"),
+    body: CartItemUpdate,
+    user_id: str = Depends(get_cart_owner),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update quantity of a cart item by SKU."""
+    """Update a cart line quantity; stock is revalidated from B2B."""
     result = await db.execute(
         select(CartItemModel).where(
-            (CartItemModel.sku_id == sku_id) &
-            (CartItemModel.user_id == user_id)
+            (CartItemModel.sku_id == sku_id) & (CartItemModel.user_id == user_id)
         )
     )
     cart_item = result.scalar_one_or_none()
 
     if not cart_item:
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "ITEM_NOT_FOUND", "message": "Cart item not found"},
         )
 
-    # Validate against current B2B stock
     try:
         sku_data = await b2b_client.get_sku_by_id(sku_id)
     except B2BClientError:
         raise HTTPException(
-            status_code=502,
+            status_code=status.HTTP_502_BAD_GATEWAY,
             detail={"code": "B2B_UNAVAILABLE", "message": "Cannot validate stock"},
         )
 
     if not sku_data:
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "SKU_NOT_FOUND", "message": "SKU no longer exists"},
         )
 
-    qty_available = sku_data.get("quantity_available", 0)
-    if quantity > qty_available:
+    qty_available = int(
+        sku_data.get("active_quantity")
+        or sku_data.get("quantity_available")
+        or sku_data.get("stock_quantity")
+        or 0
+    )
+    if body.quantity > qty_available:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_409_CONFLICT,
             detail={
                 "code": "QUANTITY_EXCEEDED",
-                "message": f"Quantity {quantity} exceeds available {qty_available}",
+                "message": f"Quantity {body.quantity} exceeds available {qty_available}",
             },
         )
 
-    cart_item.quantity = quantity
+    cart_item.quantity = body.quantity
     await db.commit()
     await db.refresh(cart_item)
 
@@ -302,21 +398,20 @@ async def update_cart_item(
 @router.delete("/items/{sku_id}", response_model=CartWithUnavailable)
 async def remove_from_cart(
     sku_id: str,
-    user_id: str = Query(..., description="User ID or guest session ID"),
+    user_id: str = Depends(get_cart_owner),
     db: AsyncSession = Depends(get_db),
 ):
-    """Remove item from cart."""
+    """Remove an item from the cart."""
     result = await db.execute(
         select(CartItemModel).where(
-            (CartItemModel.sku_id == sku_id) &
-            (CartItemModel.user_id == user_id)
+            (CartItemModel.sku_id == sku_id) & (CartItemModel.user_id == user_id)
         )
     )
     cart_item = result.scalar_one_or_none()
 
     if not cart_item:
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "ITEM_NOT_FOUND", "message": "Cart item not found"},
         )
 
@@ -330,15 +425,13 @@ async def remove_from_cart(
 # DELETE /api/v1/cart
 # =====================================================================
 
-@router.delete("", status_code=204)
+@router.delete("", status_code=status.HTTP_204_NO_CONTENT)
 async def clear_cart(
-    user_id: str = Query(..., description="User ID or guest session ID"),
+    user_id: str = Depends(get_cart_owner),
     db: AsyncSession = Depends(get_db),
 ):
-    """Remove all items from cart."""
-    await db.execute(
-        CartItemModel.__table__.delete().where(CartItemModel.user_id == user_id)
-    )
+    """Remove all items from the cart."""
+    await db.execute(CartItemModel.__table__.delete().where(CartItemModel.user_id == user_id))
     await db.commit()
 
 
@@ -348,41 +441,34 @@ async def clear_cart(
 
 @router.post("/merge", response_model=CartWithUnavailable)
 async def merge_guest_cart(
-    guest_user_id: str = Query(..., description="Guest session ID (X-Session-Id)"),
-    auth_user_id: str = Query(..., description="Authenticated user ID (from JWT)"),
+    auth_user_id: str = Depends(get_current_user_id),
+    guest_user_id: str = Header(..., alias="X-Session-Id"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Merge guest cart into authenticated user cart.
+    """Merge a guest cart into the authenticated buyer's cart.
 
-    Conflict resolution: MAX(guest_quantity, auth_quantity).
-    Guest items are NOT deleted after merge — idempotency-safe.
+    Conflict resolution: MAX(guest_quantity, auth_quantity) per SKU. Guest rows
+    are not deleted after merge (idempotency-safe).
     """
-    # Fetch guest cart items
     guest_result = await db.execute(
         select(CartItemModel).where(CartItemModel.user_id == guest_user_id)
     )
     guest_items = guest_result.scalars().all()
 
     if not guest_items:
-        # Nothing to merge — return auth user's cart as-is
         return await get_cart(user_id=auth_user_id, db=db)
 
-    # Fetch auth user cart items
     auth_result = await db.execute(
         select(CartItemModel).where(CartItemModel.user_id == auth_user_id)
     )
     auth_items = auth_result.scalars().all()
 
-    # Build lookup: sku_id -> auth quantity
     auth_lookup = {ci.sku_id: ci for ci in auth_items}
 
-    # Merge: MAX(guest, auth)
     for gi in guest_items:
         if gi.sku_id in auth_lookup:
-            merged_qty = max(gi.quantity, auth_lookup[gi.sku_id].quantity)
-            auth_lookup[gi.sku_id].quantity = merged_qty
+            auth_lookup[gi.sku_id].quantity = max(gi.quantity, auth_lookup[gi.sku_id].quantity)
         else:
-            # New item from guest — copy to auth user
             new_item = CartItemModel(
                 user_id=auth_user_id,
                 sku_id=gi.sku_id,

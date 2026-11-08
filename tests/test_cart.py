@@ -1,16 +1,22 @@
-"""Tests for cart endpoints — DoD: 4 required pytest cases."""
+"""Tests for B2C customer cart endpoints — US-CART-03."""
+
+from unittest.mock import AsyncMock
 
 import pytest
-from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+
 from src.models import CartItemModel
 from src.services.b2b_client import b2b_client
 
 
-# =====================================================================
-# Shared mocks
-# =====================================================================
+def _auth_headers(user_id: str, session_id: str | None = None) -> dict:
+    """Trusted identity headers: authenticated buyer or guest session."""
+    headers = {"X-User-Id": user_id}
+    if session_id is not None:
+        headers["X-Session-Id"] = session_id
+    return headers
+
 
 def _mock_sku_ok(
     sku_id: str = "sku-001",
@@ -20,50 +26,21 @@ def _mock_sku_ok(
     product_id: str = "prod-001",
     product_title: str = "Test Product",
 ) -> dict:
-    """Return a valid B2B SKU response."""
+    """B2B SKU-shaped response used by the cart enrichment contract."""
     return {
-        "sku_id": sku_id,
+        "id": sku_id,
         "product_id": product_id,
-        "product_title": product_title,
-        "price": price,
-        "quantity_available": quantity_available,
+        "name": product_title,
+        "price": int(price),
+        "discount": 0,
+        "stock_quantity": quantity_available,
+        "active_quantity": quantity_available,
+        "article": None,
+        "images": [],
+        "characteristics": [],
+        # B2C cart mapping tolerates both the B2B field and a legacy alias.
         "is_active": is_active,
-    }
-
-
-def _mock_sku_out_of_stock(
-    sku_id: str = "sku-002",
-    price: float = 500.0,
-    quantity_available: int = 0,
-    is_active: bool = True,
-    product_id: str = "prod-002",
-    product_title: str = "Out of Stock Product",
-) -> dict:
-    return {
-        "sku_id": sku_id,
-        "product_id": product_id,
-        "product_title": product_title,
-        "price": price,
         "quantity_available": quantity_available,
-        "is_active": is_active,
-    }
-
-
-def _mock_sku_inactive(
-    sku_id: str = "sku-003",
-    price: float = 300.0,
-    quantity_available: int = 5,
-    is_active: bool = False,
-    product_id: str = "prod-003",
-    product_title: str = "Inactive Product",
-) -> dict:
-    return {
-        "sku_id": sku_id,
-        "product_id": product_id,
-        "product_title": product_title,
-        "price": price,
-        "quantity_available": quantity_available,
-        "is_active": is_active,
     }
 
 
@@ -72,50 +49,41 @@ def _mock_sku_inactive(
 # =====================================================================
 
 @pytest.mark.asyncio
-async def test_add_sku_increments_quantity_if_already_in_cart(
-    client: TestClient, db_session
-):
+async def test_add_sku_increments_quantity_if_already_in_cart(client: TestClient, db_session):
     """Adding the same SKU a second time should increase quantity, not duplicate the row."""
     user_id = "test_user_inc"
     sku_id = "sku-inc-001"
-    mock_data = _mock_sku_ok(sku_id=sku_id, price=100.0)
+    mock_data = _mock_sku_ok(sku_id=sku_id, price=100.0, quantity_available=10)
 
-    # Add quantity=2
     b2b_client.get_sku_by_id = AsyncMock(return_value=mock_data)
     b2b_client.get_skus_by_ids = AsyncMock(return_value={sku_id: mock_data})
-    client.post(
-        f"/api/v1/cart/items?user_id={user_id}",
-        json={"sku_id": sku_id, "quantity": 2},
-    )
 
-    # Verify one row exists with quantity=2
+    response = client.post(
+        "/api/v1/cart/items",
+        json={"sku_id": sku_id, "quantity": 2},
+        headers=_auth_headers(user_id),
+    )
+    assert response.status_code == 200
+
+    response = client.post(
+        "/api/v1/cart/items",
+        json={"sku_id": sku_id, "quantity": 3},
+        headers=_auth_headers(user_id),
+    )
+    assert response.status_code == 200
+
     result = await db_session.execute(
         select(CartItemModel).where(
-            (CartItemModel.user_id == user_id) &
-            (CartItemModel.sku_id == sku_id)
+            (CartItemModel.user_id == user_id) & (CartItemModel.sku_id == sku_id)
         )
     )
     item = result.scalar_one()
-    assert item.quantity == 2
-
-    # Add quantity=3 more
-    b2b_client.get_sku_by_id = AsyncMock(return_value=mock_data)
-    b2b_client.get_skus_by_ids = AsyncMock(return_value={sku_id: mock_data})
-    client.post(
-        f"/api/v1/cart/items?user_id={user_id}",
-        json={"sku_id": sku_id, "quantity": 3},
-    )
-
-    # Refresh and check quantity is now 5
-    await db_session.refresh(item)
     assert item.quantity == 5
 
-    # Verify only one row exists
     all_items = await db_session.execute(
         select(CartItemModel).where(CartItemModel.user_id == user_id)
     )
-    items = all_items.scalars().all()
-    assert len(items) == 1
+    assert len(all_items.scalars().all()) == 1
 
 
 # =====================================================================
@@ -123,46 +91,40 @@ async def test_add_sku_increments_quantity_if_already_in_cart(
 # =====================================================================
 
 @pytest.mark.asyncio
-async def test_get_cart_enriched_with_b2b_data(
-    client: TestClient, db_session
-):
+async def test_get_cart_enriched_with_b2b_data(client: TestClient, db_session):
     """GET /cart should return items enriched with B2B product data."""
     user_id = "test_user_enrich"
     sku_id = "sku-enrich-001"
 
-    # Insert cart item directly into DB
-    cart_item = CartItemModel(
-        user_id=user_id, sku_id=sku_id, quantity=3
-    )
-    db_session.add(cart_item)
+    db_session.add(CartItemModel(user_id=user_id, sku_id=sku_id, quantity=3))
     await db_session.commit()
 
     mock_data = _mock_sku_ok(
         sku_id=sku_id,
         price=2500.0,
+        quantity_available=10,
         product_id="prod-enrich",
         product_title="Enriched Product",
     )
-
     b2b_client.get_skus_by_ids = AsyncMock(return_value={sku_id: mock_data})
-    response = client.get(f"/api/v1/cart?user_id={user_id}")
+
+    response = client.get("/api/v1/cart", headers=_auth_headers(user_id))
 
     assert response.status_code == 200
     data = response.json()
-    assert data["total_items"] == 1
-    assert data["total_amount"] == 2500.0 * 3  # price * quantity
-    # OpenAPI CartResponse required fields
-    assert data["items_count"] == 1
+    assert data["items_count"] == 3
+    assert data["total_items"] == 3
     assert data["subtotal"] == 2500.0 * 3
+    assert data["total_amount"] == 2500.0 * 3
     assert data["is_valid"] is True
     assert len(data["items"]) == 1
+
     item = data["items"][0]
     assert item["sku_id"] == sku_id
     assert item["product_id"] == "prod-enrich"
-    assert item["product_title"] == "Enriched Product"
+    assert item["name"] == "Enriched Product"
     assert item["quantity"] == 3
     assert item["subtotal"] == 7500.0
-    # OpenAPI CartItem required fields
     assert item["name"] == "Enriched Product"
     assert item["unit_price"] == 2500
     assert item["line_total"] == 7500
@@ -176,46 +138,36 @@ async def test_get_cart_enriched_with_b2b_data(
 # =====================================================================
 
 @pytest.mark.asyncio
-async def test_unavailable_sku_shown_with_reason(
-    client: TestClient, db_session
-):
-    """Unavailable SKUs appear in 'unavailable' list with reason and are excluded from total."""
+async def test_unavailable_sku_shown_with_reason(client: TestClient, db_session):
+    """Unavailable SKUs appear in unavailable list with reason and are excluded from totals."""
     user_id = "test_user_unavail"
     available_sku = "sku-avail-001"
     oos_sku = "sku-oos-001"
     inactive_sku = "sku-inactive-001"
 
-    # Insert three items into cart
-    for sku in [available_sku, oos_sku, inactive_sku]:
-        ci = CartItemModel(user_id=user_id, sku_id=sku, quantity=1)
-        db_session.add(ci)
+    for sku in (available_sku, oos_sku, inactive_sku):
+        db_session.add(CartItemModel(user_id=user_id, sku_id=sku, quantity=1))
     await db_session.commit()
 
     skus_data = {
-        available_sku: _mock_sku_ok(sku_id=available_sku, price=1000.0),
-        oos_sku: _mock_sku_out_of_stock(sku_id=oos_sku, price=500.0),
-        inactive_sku: _mock_sku_inactive(sku_id=inactive_sku, price=300.0),
+        available_sku: _mock_sku_ok(sku_id=available_sku, price=1000.0, quantity_available=10),
+        oos_sku: _mock_sku_ok(sku_id=oos_sku, price=500.0, quantity_available=0, is_active=True),
+        inactive_sku: _mock_sku_ok(sku_id=inactive_sku, price=300.0, quantity_available=5, is_active=False),
     }
-
     b2b_client.get_skus_by_ids = AsyncMock(return_value=skus_data)
-    response = client.get(f"/api/v1/cart?user_id={user_id}")
+
+    response = client.get("/api/v1/cart", headers=_auth_headers(user_id))
 
     assert response.status_code == 200
     data = response.json()
-
-    # Only available item in total
     assert data["total_items"] == 1
     assert data["total_amount"] == 1000.0
-
-    # One available item
     assert len(data["items"]) == 1
     assert data["items"][0]["sku_id"] == available_sku
 
-    # Two unavailable items with correct reasons
     unavailable = data["unavailable"]
     assert len(unavailable) == 2
-
-    reasons = {u["sku_id"]: u["unavailable_reason"] for u in unavailable}
+    reasons = {item["sku_id"]: item["unavailable_reason"] for item in unavailable}
     assert reasons[oos_sku] == "out_of_stock"
     assert reasons[inactive_sku] == "not_active"
 
@@ -225,86 +177,218 @@ async def test_unavailable_sku_shown_with_reason(
 # =====================================================================
 
 @pytest.mark.asyncio
-async def test_guest_cart_merged_on_login(
-    client: TestClient, db_session
-):
-    """Merge should take MAX(guest_quantity, auth_quantity) for conflicting SKUs."""
+async def test_guest_cart_merged_on_login(client: TestClient, db_session):
+    """Merge takes MAX(guest_quantity, auth_quantity) for conflicting SKUs."""
     guest_id = "guest-session-abc"
     auth_id = "user-xyz"
-    sku_shared = "sku-shared-001"
-    sku_guest_only = "sku-guest-only-001"
-    sku_auth_only = "sku-auth-only-001"
+    shared_sku = "sku-shared-001"
+    guest_only_sku = "sku-guest-only-001"
+    auth_only_sku = "sku-auth-only-001"
 
-    # Guest cart: sku_shared qty=5, sku_guest_only qty=3
-    db_session.add(CartItemModel(user_id=guest_id, sku_id=sku_shared, quantity=5))
-    db_session.add(CartItemModel(user_id=guest_id, sku_id=sku_guest_only, quantity=3))
-
-    # Auth cart: sku_shared qty=2, sku_auth_only qty=7
-    db_session.add(CartItemModel(user_id=auth_id, sku_id=sku_shared, quantity=2))
-    db_session.add(CartItemModel(user_id=auth_id, sku_id=sku_auth_only, quantity=7))
+    db_session.add(CartItemModel(user_id=guest_id, sku_id=shared_sku, quantity=5))
+    db_session.add(CartItemModel(user_id=guest_id, sku_id=guest_only_sku, quantity=3))
+    db_session.add(CartItemModel(user_id=auth_id, sku_id=shared_sku, quantity=2))
+    db_session.add(CartItemModel(user_id=auth_id, sku_id=auth_only_sku, quantity=7))
     await db_session.commit()
 
-    # Before merge: auth cart has 2 items
-    auth_before = await db_session.execute(
-        select(CartItemModel).where(CartItemModel.user_id == auth_id)
+    b2b_client.get_skus_by_ids = AsyncMock(
+        return_value={
+            shared_sku: _mock_sku_ok(sku_id=shared_sku, price=100.0, quantity_available=10),
+            guest_only_sku: _mock_sku_ok(sku_id=guest_only_sku, price=100.0, quantity_available=10),
+            auth_only_sku: _mock_sku_ok(sku_id=auth_only_sku, price=100.0, quantity_available=10),
+        }
     )
-    assert len(auth_before.scalars().all()) == 2
 
-    # Perform merge
-    b2b_client.get_skus_by_ids = AsyncMock(return_value={})
     response = client.post(
-        f"/api/v1/cart/merge?guest_user_id={guest_id}&auth_user_id={auth_id}"
+        "/api/v1/cart/merge",
+        headers=_auth_headers(auth_id, guest_id),
     )
 
     assert response.status_code == 200
     data = response.json()
 
-    # After merge: auth cart should have 3 items
-    auth_after = await db_session.execute(
+    result = await db_session.execute(
         select(CartItemModel).where(CartItemModel.user_id == auth_id)
     )
-    items_after = auth_after.scalars().all()
+    items_after = result.scalars().all()
     assert len(items_after) == 3
 
-    # Build lookup for verification
-    lookup = {ci.sku_id: ci.quantity for ci in items_after}
-    # MAX(5, 2) = 5 for shared SKU
-    assert lookup[sku_shared] == 5
-    # Guest-only item copied as-is
-    assert lookup[sku_guest_only] == 3
-    # Auth-only item unchanged
-    assert lookup[sku_auth_only] == 7
+    lookup = {item.sku_id: item.quantity for item in items_after}
+    assert lookup[shared_sku] == 5
+    assert lookup[guest_only_sku] == 3
+    assert lookup[auth_only_sku] == 7
+    assert data["is_valid"] is True
 
 
 # =====================================================================
-# Extra: IDOR protection — user cannot access another user's cart
+# Extra: cart validation and contract-level behaviour
 # =====================================================================
 
 @pytest.mark.asyncio
-async def test_idor_protection_cart_access(
-    client: TestClient, db_session
-):
-    """User A cannot read/modify User B's cart items."""
-    user_a = "user-a"
-    user_b = "user-b"
-
-    # User B has a cart item
-    db_session.add(CartItemModel(user_id=user_b, sku_id="sku-secret", quantity=1))
+async def test_cart_validate_returns_unavailable_issue(client: TestClient, db_session):
+    """POST /cart/validate returns is_valid=false and an unavailable issue."""
+    user_id = "test_user_validate"
+    sku_id = "sku-validate-001"
+    db_session.add(CartItemModel(user_id=user_id, sku_id=sku_id, quantity=2))
     await db_session.commit()
 
-    # User A tries to GET B's cart
-    response = client.get(f"/api/v1/cart?user_id={user_b}")
+    b2b_client.get_skus_by_ids = AsyncMock(
+        return_value={sku_id: _mock_sku_ok(sku_id=sku_id, price=100.0, quantity_available=0)}
+    )
+
+    response = client.post("/api/v1/cart/validate", headers=_auth_headers(user_id))
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["is_valid"] is False
+    assert len(data["issues"]) == 1
+    assert data["issues"][0]["sku_id"] == sku_id
+    assert data["issues"][0]["type"] == "OUT_OF_STOCK"
+    assert data["cart"]["items"] == []
+    assert data["cart"]["items_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_add_sku_quantity_exceeded_returns_409(client: TestClient, db_session):
+    """Adding more than available stock returns the documented 409 conflict."""
+    user_id = "test_user_quantity"
+    sku_id = "sku-quantity-001"
+    mock_data = _mock_sku_ok(sku_id=sku_id, price=100.0, quantity_available=3)
+
+    b2b_client.get_sku_by_id = AsyncMock(return_value=mock_data)
+    b2b_client.get_skus_by_ids = AsyncMock(return_value={sku_id: mock_data})
+
+    response = client.post(
+        "/api/v1/cart/items",
+        json={"sku_id": sku_id, "quantity": 2},
+        headers=_auth_headers(user_id),
+    )
+    assert response.status_code == 200
+
+    response = client.post(
+        "/api/v1/cart/items",
+        json={"sku_id": sku_id, "quantity": 2},
+        headers=_auth_headers(user_id),
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "QUANTITY_EXCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_update_cart_item_accepts_json_quantity(client: TestClient, db_session):
+    """PATCH /cart/items/{sku_id} accepts quantity in the JSON body."""
+    user_id = "test_user_update"
+    sku_id = "sku-update-001"
+    db_session.add(CartItemModel(user_id=user_id, sku_id=sku_id, quantity=2))
+    await db_session.commit()
+
+    b2b_client.get_sku_by_id = AsyncMock(
+        return_value=_mock_sku_ok(sku_id=sku_id, price=100.0, quantity_available=10)
+    )
+    b2b_client.get_skus_by_ids = AsyncMock(
+        return_value={sku_id: _mock_sku_ok(sku_id=sku_id, price=100.0, quantity_available=10)}
+    )
+
+    response = client.patch(
+        f"/api/v1/cart/items/{sku_id}",
+        json={"quantity": 5},
+        headers=_auth_headers(user_id),
+    )
+    assert response.status_code == 200
+    assert response.json()["items_count"] == 5
+
+    result = await db_session.execute(
+        select(CartItemModel).where(
+            (CartItemModel.user_id == user_id) & (CartItemModel.sku_id == sku_id)
+        )
+    )
+    assert result.scalar_one().quantity == 5
+
+
+@pytest.mark.asyncio
+async def test_update_cart_item_quantity_exceeded_returns_409(client: TestClient, db_session):
+    """PATCH with a quantity above available stock returns 409."""
+    user_id = "test_user_update_exceeded"
+    sku_id = "sku-update-exceeded"
+    db_session.add(CartItemModel(user_id=user_id, sku_id=sku_id, quantity=1))
+    await db_session.commit()
+
+    b2b_client.get_sku_by_id = AsyncMock(
+        return_value=_mock_sku_ok(sku_id=sku_id, price=100.0, quantity_available=2)
+    )
+
+    response = client.patch(
+        f"/api/v1/cart/items/{sku_id}",
+        json={"quantity": 3},
+        headers=_auth_headers(user_id),
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "QUANTITY_EXCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_sku_lookup_uses_b2b_active_quantity(client: TestClient, db_session):
+    """Cart maps B2B ``active_quantity`` into buyer availability."""
+    user_id = "test_user_b2b_fields"
+    sku_id = "sku-b2b-fields"
+    db_session.add(CartItemModel(user_id=user_id, sku_id=sku_id, quantity=2))
+    await db_session.commit()
+
+    b2b_client.get_skus_by_ids = AsyncMock(
+        return_value={
+            sku_id: {
+                "id": sku_id,
+                "product_id": "prod-b2b",
+                "name": "B2B Product",
+                "price": 100,
+                "discount": 0,
+                "stock_quantity": 2,
+                "active_quantity": 2,
+                "article": None,
+                "images": [],
+                "characteristics": [],
+            }
+        }
+    )
+
+    response = client.get("/api/v1/cart", headers=_auth_headers(user_id))
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["is_valid"] is True
+    assert data["items"][0]["available_quantity"] == 2
+    assert data["items"][0]["is_available"] is True
+
+
+# =====================================================================
+# Extra: cart identity must come from headers, not query
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_cart_requires_owner_header(client: TestClient):
+    """Cart operations without an owner header return 401 in the Error envelope."""
+    response = client.get("/api/v1/cart")
+    assert response.status_code == 401
+    assert response.json()["code"] == "MISSING_AUTH"
+
+
+@pytest.mark.asyncio
+async def test_idor_protection_cart_access(client: TestClient, db_session):
+    """A buyer cannot read or delete another buyer's cart using spoofable IDs."""
+    user_a = "user-a"
+    user_b = "user-b"
+    sku_id = "sku-secret"
+
+    db_session.add(CartItemModel(user_id=user_b, sku_id=sku_id, quantity=1))
+    await db_session.commit()
+
+    response = client.get("/api/v1/cart", headers=_auth_headers(user_a))
     assert response.status_code == 200
     data = response.json()
     assert data["items"] == []
-    assert data["total_items"] == 0
     assert data["items_count"] == 0
     assert data["subtotal"] == 0
-    # Required OpenAPI field must be present; the cart has an unavailable item,
-    # so it is not valid, but it is still excluded from the totals above.
-    assert "is_valid" in data
-    assert data["is_valid"] is False
+    assert data["is_valid"] is True
 
-    # User A tries to DELETE B's cart item
-    response = client.delete(f"/api/v1/cart/items/sku-secret?user_id={user_a}")
+    response = client.delete(f"/api/v1/cart/items/{sku_id}", headers=_auth_headers(user_a))
     assert response.status_code == 404
