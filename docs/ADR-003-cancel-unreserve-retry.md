@@ -63,5 +63,7 @@ for the queue is a stack mismatch.
 - `python -m src.workers.retry_cancel_pending --limit 100`: cron entrypoint
   that processes all due `CANCEL_PENDING` orders. B2B unreserve is idempotent
   by `order_id`, so concurrent runs are safe.
-- Allowed cancellation statuses are `CREATED` and `PAID`; anything else
-  returns `409 CANCEL_NOT_ALLOWED` with `current_status`.
+- Allowed cancellation statuses are `CREATED`, `PAID`, `ASSEMBLING` and
+  `DELIVERING` (canon flow `b2c-11-cancel-order`: the order can be cancelled
+  until it is handed over). `DELIVERED`, `CANCELLED` and `CANCEL_PENDING`
+  return `409 CANCEL_NOT_ALLOWED` with `current_status`.
