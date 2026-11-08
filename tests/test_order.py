@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from src.models import OrderModel, OrderItemModel, CartItemModel
 from src.schemas import OrderStatus
-from src.services.b2b_client import b2b_client
+from src.services.b2b_client import B2BClientError, b2b_client
 
 
 # =====================================================================
@@ -28,6 +28,23 @@ def _mock_sku(sku_id: str, price: float = 1000.0,
         "price": price,
         "quantity_available": quantity_available,
         "is_active": is_active,
+    }
+
+
+def _mock_product(product_id: str, title: str) -> dict:
+    """B2B product-shaped response used for historical product names."""
+    return {
+        "id": product_id,
+        "title": title,
+        "status": "MODERATED",
+        "seller_id": "seller-1",
+        "category_id": "cat-1",
+        "description": "",
+        "images": [],
+        "characteristics": [],
+        "skus": [],
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
     }
 
 
@@ -67,6 +84,11 @@ async def test_checkout_creates_paid_order_with_fixed_prices(
 
     b2b_client.get_skus_by_ids = AsyncMock(return_value=skus_data)
     b2b_client.reserve_stock = AsyncMock(return_value=_mock_reserve_success())
+    products = {
+        "prod-001": _mock_product("prod-001", "Widget Product A"),
+        "prod-002": _mock_product("prod-002", "Widget Product B"),
+    }
+    b2b_client.get_product_by_id = AsyncMock(side_effect=lambda product_id: products[product_id])
 
     payload = {
         "user_id": user_id,
@@ -75,6 +97,15 @@ async def test_checkout_creates_paid_order_with_fixed_prices(
     response = client.post("/api/v1/orders", json=payload, headers={"Idempotency-Key": idem_key})
     assert response.status_code == 201
     data = response.json()
+
+    # B2B reserve receives the published ReserveRequest shape.
+    reserve_kwargs = b2b_client.reserve_stock.await_args.kwargs
+    assert reserve_kwargs["idempotency_key"] == idem_key
+    assert reserve_kwargs["order_id"] == data["order_id"]
+    assert reserve_kwargs["reservations"] == [
+        {"sku_id": sku_1, "quantity": 2},
+        {"sku_id": sku_2, "quantity": 1},
+    ]
 
     # OpenAPI OrderResponse required fields
     for field in ("id", "buyer_id", "status", "items", "subtotal", "total", "address", "created_at"):
@@ -100,10 +131,10 @@ async def test_checkout_creates_paid_order_with_fixed_prices(
     assert prices[sku_1] == 1000.0
     assert prices[sku_2] == 2500.0
 
-    # Historical data captured
+    # Historical data captured — product title comes from the product, not SKU name.
     titles = {it["sku_id"]: it["product_title"] for it in data["items"]}
-    assert titles[sku_1] == "Widget A"
-    assert titles[sku_2] == "Widget B"
+    assert titles[sku_1] == "Widget Product A"
+    assert titles[sku_2] == "Widget Product B"
 
     # Idempotency key stored
     result = await db_session.execute(
@@ -143,7 +174,16 @@ async def test_partial_reserve_failure_returns_409(
 
     failed = [{"sku_id": sku_fail, "reason": "out_of_stock"}]
     b2b_client.get_skus_by_ids = AsyncMock(return_value=skus_data)
-    b2b_client.reserve_stock = AsyncMock(return_value=_mock_reserve_success(failed=failed))
+    b2b_client.reserve_stock = AsyncMock(
+        side_effect=B2BClientError(
+            status_code=409,
+            message="Insufficient stock",
+            details={"failed_items": failed},
+        )
+    )
+    b2b_client.get_product_by_id = AsyncMock(
+        side_effect=lambda product_id: _mock_product(product_id, "Widget Product C")
+    )
 
     payload = {"user_id": user_id}
 
@@ -180,6 +220,9 @@ async def test_idempotency_returns_existing_order(
     skus_data = {sku_id: _mock_sku(sku_id, price=500.0)}
     b2b_client.get_skus_by_ids = AsyncMock(return_value=skus_data)
     b2b_client.reserve_stock = AsyncMock(return_value=_mock_reserve_success())
+    b2b_client.get_product_by_id = AsyncMock(
+        side_effect=lambda product_id: _mock_product(product_id, "Widget Product D")
+    )
 
     payload = {"user_id": user_id}
 
@@ -237,7 +280,54 @@ async def test_b2b_unavailable_returns_503(
 
 
 # =====================================================================
-# 5. checkout_empty_cart_returns_400
+# 5. checkout_snapshot_mismatch_returns_cart_validation_response
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_checkout_snapshot_mismatch_returns_cart_validation_response(
+    client: TestClient, db_session
+):
+    """Snapshot mismatch → OpenAPI CartValidationResponse with 422."""
+    user_id = "test_user_snapshot"
+    sku_id = "sku-snapshot-001"
+
+    db_session.add(_mock_cart_item(user_id, sku_id, quantity=1))
+    await db_session.commit()
+
+    b2b_client.get_skus_by_ids = AsyncMock(
+        return_value={sku_id: _mock_sku(sku_id, price=500.0)}
+    )
+    b2b_client.get_product_by_id = AsyncMock(
+        side_effect=lambda product_id: _mock_product(product_id, "Widget Product F")
+    )
+
+    response = client.post(
+        "/api/v1/orders",
+        json={
+            "user_id": user_id,
+            "items_snapshot": [
+                {
+                    "sku_id": sku_id,
+                    "quantity": 2,
+                    "unit_price": 500,
+                }
+            ],
+        },
+        headers={"Idempotency-Key": "idem-snapshot-001"},
+    )
+
+    assert response.status_code == 422
+    data = response.json()
+    assert data["is_valid"] is False
+    assert data["cart"]["items"][0]["sku_id"] == sku_id
+    assert data["cart"]["items"][0]["quantity"] == 1
+    assert len(data["issues"]) == 1
+    assert data["issues"][0]["sku_id"] == sku_id
+    assert data["issues"][0]["type"] == "QUANTITY_REDUCED"
+
+
+# =====================================================================
+# 6. checkout_empty_cart_returns_400
 # =====================================================================
 
 @pytest.mark.asyncio
@@ -307,6 +397,9 @@ async def test_idempotency_key_reused_with_different_body_returns_409(
         return_value={sku_id: _mock_sku(sku_id, price=100.0)}
     )
     b2b_client.reserve_stock = AsyncMock(return_value=_mock_reserve_success())
+    b2b_client.get_product_by_id = AsyncMock(
+        side_effect=lambda product_id: _mock_product(product_id, "Widget Product E")
+    )
 
     r1 = client.post(
         "/api/v1/orders",

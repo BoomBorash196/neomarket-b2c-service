@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -15,6 +16,10 @@ from src.database import get_db
 from src.models import CartItemModel, OrderItemModel, OrderModel
 from src.schemas import (
     AddressResponse,
+    CartItem,
+    CartResponse,
+    CartValidationIssue,
+    CartValidationResponse,
     Order,
     OrderCreate,
     OrderItem,
@@ -81,7 +86,7 @@ def _order_to_schema(order: OrderModel, items: List[OrderItemModel]) -> Order:
                 order_id=it.order_id,
                 sku_id=it.sku_id,
                 product_id=it.product_id,
-                name=it.sku_name or it.product_title or it.sku_id,
+                name=it.product_title or it.sku_name or it.sku_id,
                 sku_name=it.sku_name,
                 product_title=it.product_title,
                 quantity=it.quantity,
@@ -178,15 +183,50 @@ async def _replay_existing_order(
     return _order_to_schema(existing, items)
 
 
-async def _release_reservations(reserved: List[dict]) -> None:
+def _cart_validation_response(
+    user_id: str,
+    available: List[dict],
+    unavailable: List[dict],
+) -> CartValidationResponse:
+    """Build the OpenAPI ``CartValidationResponse`` for an invalid cart."""
+    issues: List[CartValidationIssue] = []
+    for item in unavailable:
+        reason = item.get("unavailable_reason")
+        if reason == "out_of_stock":
+            issue_type = "OUT_OF_STOCK"
+        elif reason == "not_active":
+            issue_type = "PRODUCT_BLOCKED"
+        elif reason == "sku_not_found":
+            issue_type = "PRODUCT_DELETED"
+        else:
+            issue_type = "OUT_OF_STOCK"
+        issues.append(
+            CartValidationIssue(
+                sku_id=item["sku_id"],
+                type=issue_type,
+                message=f"SKU {item['sku_id']} is unavailable: {reason}",
+            )
+        )
+
+    cart = CartResponse(
+        items=[CartItem(**item) for item in available],
+        items_count=sum(int(item.get("quantity") or 0) for item in available),
+        subtotal=sum(float(item.get("subtotal") or 0.0) for item in available),
+        is_valid=not unavailable,
+    )
+    return CartValidationResponse(is_valid=cart.is_valid, cart=cart, issues=issues)
+
+
+async def _release_reservations(order_id: str, reserved: List[dict]) -> None:
     """Best-effort compensation for a partial reserve."""
     for entry in reserved:
         quantity = entry.get("reserved") or 0
         if quantity <= 0:
             continue
         try:
-            await b2b_client.reserve_stock(
-                [{"sku_id": entry.get("sku_id"), "quantity": -quantity}]
+            await b2b_client.unreserve_order(
+                order_id,
+                [{"sku_id": entry.get("sku_id"), "quantity": quantity}],
             )
         except B2BClientError:
             # Compensation is best-effort; the failed reserve response is
@@ -280,12 +320,18 @@ async def checkout(
         sku_info = skus_data.get(ci.sku_id)
         if not sku_info:
             continue
+        product = await b2b_client.get_product_by_id(sku_info.get("product_id", ""))
+        product_title = (
+            str(product.get("title") or "")
+            if product
+            else str(sku_info.get("name") or "")
+        )
         enriched_items.append({
             "cart_item": ci,
             "sku_id": ci.sku_id,
             "sku_name": sku_info.get("name", ci.sku_id),
             "product_id": sku_info.get("product_id", ""),
-            "product_title": sku_info.get("name", ""),
+            "product_title": product_title,
             "quantity": ci.quantity,
             "unit_price": sku_info.get("price", 0.0),
         })
@@ -303,28 +349,44 @@ async def checkout(
     if order_data.items_snapshot:
         snapshot = {s.sku_id: s for s in order_data.items_snapshot}
         actual = {it["sku_id"]: it for it in enriched_items}
-        if set(snapshot) != set(actual):
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "code": "CART_SNAPSHOT_MISMATCH",
-                    "message": "items_snapshot does not match the cart",
-                },
+        if set(snapshot) != set(actual) or any(
+            snap.quantity != actual[sku_id]["quantity"]
+            or snap.unit_price != int(round(actual[sku_id]["unit_price"]))
+            for sku_id, snap in snapshot.items()
+        ):
+            available_for_validation = [
+                {
+                    "cart_item_id": str(it["cart_item"].cart_item_id),
+                    "sku_id": it["sku_id"],
+                    "product_id": it["product_id"],
+                    "name": it["product_title"],
+                    "quantity": int(it["quantity"]),
+                    "unit_price": int(round(it["unit_price"])),
+                    "line_total": int(round(it["unit_price"] * it["quantity"])),
+                    "available_quantity": 10,
+                    "is_available": True,
+                    "subtotal": float(int(round(it["unit_price"] * it["quantity"]))),
+                }
+                for it in enriched_items
+            ]
+            validation = _cart_validation_response(
+                user_id, available_for_validation, []
             )
-        for sku_id, snap in snapshot.items():
-            if (
-                snap.quantity != actual[sku_id]["quantity"]
-                or snap.unit_price != int(round(actual[sku_id]["unit_price"]))
-            ):
-                raise HTTPException(
-                    status_code=422,
-                    detail={
-                        "code": "CART_SNAPSHOT_MISMATCH",
-                        "message": (
-                            "items_snapshot does not match the cart"
-                        ),
-                    },
-                )
+            validation = CartValidationResponse(
+                is_valid=False,
+                cart=validation.cart,
+                issues=[
+                    CartValidationIssue(
+                        sku_id=next(iter(snapshot), ""),
+                        type="QUANTITY_REDUCED",
+                        message="items_snapshot does not match the cart",
+                    )
+                ],
+            )
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content=validation.model_dump(by_alias=True, exclude_none=True),
+            )
 
     total_amount = sum(
         it["unit_price"] * it["quantity"] for it in enriched_items
@@ -361,9 +423,27 @@ async def checkout(
     ]
 
     try:
-        reserve_response = await b2b_client.reserve_stock(reservations)
+        reserve_response = await b2b_client.reserve_stock(
+            idempotency_key=idempotency_key,
+            order_id=order.order_id,
+            reservations=reservations,
+        )
     except B2BClientError as exc:
         await db.rollback()
+        if exc.status_code == 409:
+            failed_items = list(
+                exc.details.get("failed_items")
+                or exc.details.get("failed")
+                or []
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "RESERVE_FAILED",
+                    "message": "Could not reserve all items",
+                    "failed_items": failed_items,
+                },
+            ) from exc
         if exc.status_code >= 500:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -384,7 +464,7 @@ async def checkout(
     if failed_items:
         # Roll back the order row and release anything B2B did reserve.
         await db.rollback()
-        await _release_reservations(reserve_response.get("success", []) or [])
+        await _release_reservations(order.order_id, reserve_response.get("success", []) or [])
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
