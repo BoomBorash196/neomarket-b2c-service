@@ -48,12 +48,22 @@ class B2BClientError(Exception):
 
     ``kind`` lets the caller distinguish causes without string matching:
     ``timeout`` | ``connect`` | ``http`` | ``protocol`` | ``decode``.
+
+    ``details`` carries optional structured error payload (for example the
+    failed reservation entries sent by B2B on a 409 conflict).
     """
 
-    def __init__(self, status_code: int, message: str = "B2B service unavailable", kind: str = "http"):
+    def __init__(
+        self,
+        status_code: int,
+        message: str = "B2B service unavailable",
+        kind: str = "http",
+        details: Optional[dict] = None,
+    ) -> None:
         self.status_code = status_code
         self.message = message
         self.kind = kind
+        self.details = details or {}
         super().__init__(message)
 
 
@@ -115,10 +125,20 @@ class B2BClient:
                 kind="http",
             )
         if response.status_code >= 400:
+            error_body: Optional[dict] = None
+            try:
+                error_body = response.json() or {}
+            except ValueError:
+                error_body = None
+            details = error_body if isinstance(error_body, dict) else {}
             raise B2BClientError(
                 status_code=response.status_code,
-                message=f"B2B {method} {path} returned {response.status_code}: {response.text[:500]}",
+                message=str(
+                    details.get("message")
+                    or f"B2B {method} {path} returned {response.status_code}: {response.text[:500]}"
+                ),
                 kind="http",
+                details=details,
             )
 
         try:
@@ -286,7 +306,9 @@ class B2BClient:
             try:
                 sku = await self.get_sku_by_id(sku_id)
             except B2BClientError as exc:
-                if exc.kind == "connect" or exc.kind == "timeout":
+                if exc.status_code == 404:
+                    continue
+                if exc.status_code >= 500 or exc.kind in ("connect", "timeout"):
                     raise
                 continue
             if sku is not None:
@@ -351,8 +373,16 @@ class B2BClient:
         except B2BClientError:
             return {"products": [], "total": 0}
 
-    async def reserve_stock(self, reservations: list[dict]) -> dict:
+    async def reserve_stock(
+        self,
+        idempotency_key: str,
+        order_id: str,
+        reservations: list[dict],
+    ) -> dict:
         """Reserve stock in B2B for order creation.
+
+        B2B expects the published ``ReserveRequest`` shape:
+        ``{idempotency_key, order_id, items}``.
 
         B2B returns:
         {
@@ -362,10 +392,15 @@ class B2BClient:
           "total_failed": int
         }
         """
-        try:
-            return await self._request("POST", "/inventory/reserve", json_body={"reservations": reservations})
-        except B2BClientError as exc:
-            raise exc
+        return await self._request(
+            "POST",
+            "/inventory/reserve",
+            json_body={
+                "idempotency_key": idempotency_key,
+                "order_id": order_id,
+                "items": reservations,
+            },
+        )
 
     async def unreserve_order(self, order_id: str, items: list[dict]) -> dict:
         """Release a previously reserved order (idempotent by ``order_id``).
