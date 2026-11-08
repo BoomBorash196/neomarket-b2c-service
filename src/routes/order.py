@@ -36,6 +36,16 @@ from src.services.order_cancel import (
 
 router = APIRouter()
 
+# Cancellation window per canon flow ``b2c-11-cancel-order``: the buyer may
+# cancel while the order has not been handed over yet (i.e. everything before
+# DELIVERED). DELIVERED/CANCELLED/CANCEL_PENDING stay non-cancellable.
+CANCELLABLE_STATUSES = (
+    OrderStatus.CREATED,
+    OrderStatus.PAID,
+    OrderStatus.ASSEMBLING,
+    OrderStatus.DELIVERING,
+)
+
 
 # =====================================================================
 # Helpers
@@ -603,11 +613,12 @@ async def cancel_order(
     x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Cancel an order in CREATED/PAID status.
+    """Cancel an order before it is delivered.
 
     Canon flow ``b2c-11-cancel-order``:
       1. Check the order exists and belongs to the buyer (IDOR) → else 404.
-      2. Only CREATED/PAID can be cancelled → else 409 CANCEL_NOT_ALLOWED.
+      2. CREATED/PAID/ASSEMBLING/DELIVERING can be cancelled → else
+         409 CANCEL_NOT_ALLOWED.
       3. Persist CANCEL_PENDING *before* calling B2B, so the intent survives
          a crash/restart.
       4. Call idempotent B2B unreserve:
@@ -630,8 +641,7 @@ async def cancel_order(
             detail={"code": "ORDER_NOT_FOUND", "message": "Order not found"},
         )
 
-    cancellable_statuses = [OrderStatus.CREATED, OrderStatus.PAID]
-    if order.status not in cancellable_statuses:
+    if order.status not in CANCELLABLE_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={

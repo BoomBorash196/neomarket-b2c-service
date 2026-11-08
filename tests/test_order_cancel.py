@@ -140,17 +140,86 @@ async def test_unreserve_failure_transitions_to_cancel_pending(
 
 
 # =====================================================================
-# 3. cancel_assembling_order_returns_409
+# 3. cancel_assembling_order_transitions_to_cancelled
 # =====================================================================
 
 @pytest.mark.asyncio
-async def test_cancel_assembling_order_returns_409(
+async def test_cancel_assembling_order_transitions_to_cancelled(
     client: TestClient, db_session
 ):
-    """Order in ASSEMBLING cannot be cancelled → 409 CANCEL_NOT_ALLOWED."""
+    """ASSEMBLING is inside the cancel window (canon flow) → CANCELLED."""
     user_id = "test_user_cancel_assembling"
     order = await _add_order_with_item(
-        db_session, user_id, OrderStatus.ASSEMBLING, total_amount=1000.0
+        db_session,
+        user_id,
+        OrderStatus.ASSEMBLING,
+        quantity=2,
+        total_amount=2000.0,
+    )
+    await db_session.commit()
+
+    b2b_client.unreserve_order = AsyncMock(
+        return_value={"order_id": order.order_id, "status": "UNRESERVED"}
+    )
+
+    response = client.post(
+        f"/api/v1/orders/{order.order_id}/cancel?user_id={user_id}"
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == OrderStatus.CANCELLED.value
+    b2b_client.unreserve_order.assert_awaited_once_with(
+        order.order_id,
+        [{"sku_id": "sku-001", "quantity": 2}],
+    )
+
+    await db_session.refresh(order)
+    assert order.status == OrderStatus.CANCELLED
+
+
+# =====================================================================
+# 4. cancel_delivering_order_transitions_to_cancelled
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_cancel_delivering_order_transitions_to_cancelled(
+    client: TestClient, db_session
+):
+    """DELIVERING is still cancellable until the order is handed over."""
+    user_id = "test_user_cancel_delivering"
+    order = await _add_order_with_item(
+        db_session, user_id, OrderStatus.DELIVERING, total_amount=1000.0
+    )
+    await db_session.commit()
+
+    b2b_client.unreserve_order = AsyncMock(
+        return_value={"order_id": order.order_id, "status": "UNRESERVED"}
+    )
+
+    response = client.post(
+        f"/api/v1/orders/{order.order_id}/cancel?user_id={user_id}"
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == OrderStatus.CANCELLED.value
+    b2b_client.unreserve_order.assert_awaited_once()
+
+    await db_session.refresh(order)
+    assert order.status == OrderStatus.CANCELLED
+
+
+# =====================================================================
+# 5. cancel_delivered_order_returns_409
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_cancel_delivered_order_returns_409(
+    client: TestClient, db_session
+):
+    """Order already DELIVERED is outside the cancel window → 409."""
+    user_id = "test_user_cancel_delivered"
+    order = await _add_order_with_item(
+        db_session, user_id, OrderStatus.DELIVERED, total_amount=1000.0
     )
     await db_session.commit()
 
@@ -162,12 +231,12 @@ async def test_cancel_assembling_order_returns_409(
     assert response.status_code == 409
     data = response.json()
     assert data["code"] == "CANCEL_NOT_ALLOWED"
-    assert data["current_status"] == "ASSEMBLING"
+    assert data["current_status"] == "DELIVERED"
     b2b_client.unreserve_order.assert_not_called()
 
 
 # =====================================================================
-# 4. other_user_order_returns_404
+# 6. other_user_order_returns_404
 # =====================================================================
 
 @pytest.mark.asyncio
@@ -195,7 +264,7 @@ async def test_other_user_order_returns_404(
 
 
 # =====================================================================
-# 5. cancel_retry_success
+# 7. cancel_retry_success
 # =====================================================================
 
 @pytest.mark.asyncio
@@ -226,7 +295,7 @@ async def test_cancel_retry_success(
 
 
 # =====================================================================
-# 6. cancel_retry_wrong_status_returns_400
+# 8. cancel_retry_wrong_status_returns_400
 # =====================================================================
 
 @pytest.mark.asyncio
@@ -249,7 +318,7 @@ async def test_cancel_retry_wrong_status_returns_400(
 
 
 # =====================================================================
-# 7. retry_worker_processes_due_cancel_pending_orders
+# 9. retry_worker_processes_due_cancel_pending_orders
 # =====================================================================
 
 @pytest.mark.asyncio
@@ -287,7 +356,7 @@ async def test_retry_worker_processes_due_cancel_pending_orders(db_session):
 
 
 # =====================================================================
-# 8. backoff grows exponentially and is capped
+# 10. backoff grows exponentially and is capped
 # =====================================================================
 
 def test_cancel_retry_backoff_is_exponential_and_capped():
