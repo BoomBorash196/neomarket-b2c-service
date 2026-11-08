@@ -1,7 +1,7 @@
 """Pydantic schemas for request/response validation."""
 
 from pydantic import BaseModel, Field, model_validator
-from typing import Optional, List
+from typing import Optional, List, Union
 from datetime import datetime
 from enum import Enum
 
@@ -74,26 +74,32 @@ class CartItemCreate(BaseModel):
     quantity: int = Field(ge=1, le=999)
 
 
+class CartItemUpdate(BaseModel):
+    """Update cart item quantity request (OpenAPI PATCH body)."""
+
+    quantity: int = Field(ge=1, le=999)
+
+
 class CartItem(BaseModel):
     """Cart item with product details.
 
     OpenAPI ``CartItem`` requires ``sku_id``, ``product_id``, ``name``,
-    ``quantity``, ``unit_price``, ``line_total``, ``available_quantity``,
+    ``quantity``, ``unit_price``, ``line_total``, ``available_quantity`` and
     ``is_available``. Legacy fields (``cart_item_id``, ``product_title``,
-    ``sku_info``, ``subtotal``) are kept for older clients.
+    ``sku_info``, ``subtotal``) are kept for older clients but are optional.
     """
-    cart_item_id: str
     sku_id: str
     product_id: str
-    product_title: str
-    sku_info: SKUInfo
+    name: str
     quantity: int
-    subtotal: float
-    name: str = ""
-    unit_price: int = 0
-    line_total: int = 0
-    available_quantity: int = 0
-    is_available: bool = True
+    unit_price: int
+    line_total: int
+    available_quantity: int
+    is_available: bool
+    cart_item_id: Optional[str] = None
+    product_title: Optional[str] = None
+    sku_info: Optional[SKUInfo] = None
+    subtotal: Optional[float] = None
     sku_code: Optional[str] = None
     unit_price_at_add: Optional[int] = None
     image: Optional[ImageRef] = None
@@ -128,18 +134,42 @@ class UnavailableCartItem(BaseModel):
     unavailable_reason: str  # "out_of_stock" | "not_active" | "sku_not_found"
 
 
-class CartWithUnavailable(BaseModel):
-    """Cart response with both available and unavailable items."""
-    user_id: str
+class CartResponse(BaseModel):
+    """User cart with totals (OpenAPI ``CartResponse``)."""
+
     items: List[CartItem]
-    total_items: int
-    total_amount: float
-    unavailable: List[UnavailableCartItem] = []
+    items_count: int
+    subtotal: float
+    is_valid: bool
     id: Optional[str] = None
-    items_count: int = 0
-    subtotal: float = 0.0
-    is_valid: bool = True
     updated_at: Optional[datetime] = None
+
+
+class CartWithUnavailable(CartResponse):
+    """Cart response with both available and unavailable items."""
+
+    user_id: Optional[str] = None
+    total_items: Optional[int] = None
+    total_amount: Optional[float] = None
+    unavailable: List[UnavailableCartItem] = []
+
+
+class CartValidationIssue(BaseModel):
+    """Single validation problem for a cart position."""
+
+    sku_id: str
+    type: str
+    message: str
+    old_value: Optional[Union[str, int]] = None
+    new_value: Optional[Union[str, int]] = None
+
+
+class CartValidationResponse(BaseModel):
+    """Cart validation result: whole cart validity + list of issues."""
+
+    is_valid: bool
+    cart: CartResponse
+    issues: List[CartValidationIssue] = []
 
 
 # --- Order schemas ---
