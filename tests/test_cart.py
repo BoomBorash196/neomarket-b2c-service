@@ -63,7 +63,7 @@ async def test_add_sku_increments_quantity_if_already_in_cart(client: TestClient
         json={"sku_id": sku_id, "quantity": 2},
         headers=_auth_headers(user_id),
     )
-    assert response.status_code == 200
+    assert response.status_code == 201
 
     response = client.post(
         "/api/v1/cart/items",
@@ -123,14 +123,31 @@ async def test_get_cart_enriched_with_b2b_data(client: TestClient, db_session):
     assert item["sku_id"] == sku_id
     assert item["product_id"] == "prod-enrich"
     assert item["name"] == "Enriched Product"
+    assert item["product_title"] == "Enriched Product"
+    assert item["sku_name"] == "Enriched Product"
     assert item["quantity"] == 3
     assert item["subtotal"] == 7500.0
     assert item["name"] == "Enriched Product"
     assert item["unit_price"] == 2500
     assert item["line_total"] == 7500
     assert item["available_quantity"] == 10
+    assert item["available_stock"] == 10
     assert item["is_available"] is True
+    assert item["available"] is True
+    assert item["item_id"] == item["cart_item_id"]
     assert data["unavailable"] == []
+
+    # Canonical summary / checkout payload.
+    assert data["summary"]["total_amount"] == 7500
+    assert data["summary"]["total_items"] == 1
+    assert data["summary"]["total_quantity"] == 3
+    assert data["summary"]["available_items"] == 1
+    assert data["summary"]["has_unavailable_items"] is False
+    assert data["summary"]["checkout_ready"] is True
+    assert data["summary"]["currency"] == "RUB"
+    assert data["checkout_payload"]["total_amount"] == 7500
+    assert len(data["checkout_payload"]["items"]) == 1
+    assert data["checkout_payload"]["items"][0]["sku_id"] == sku_id
 
 
 # =====================================================================
@@ -160,16 +177,46 @@ async def test_unavailable_sku_shown_with_reason(client: TestClient, db_session)
 
     assert response.status_code == 200
     data = response.json()
-    assert data["total_items"] == 1
+    # The cart spec requires every row in ``items`` and in the quantity count,
+    # including unavailable rows. Only available lines contribute to money.
+    assert data["items_count"] == 3
+    assert data["total_items"] == 3
     assert data["total_amount"] == 1000.0
-    assert len(data["items"]) == 1
-    assert data["items"][0]["sku_id"] == available_sku
+    assert data["subtotal"] == 1000.0
+    assert data["is_valid"] is False
+    assert len(data["items"]) == 3
+
+    items_by_sku = {item["sku_id"]: item for item in data["items"]}
+    assert items_by_sku[available_sku]["is_available"] is True
+    assert items_by_sku[available_sku]["available"] is True
+
+    oos_item = items_by_sku[oos_sku]
+    assert oos_item["is_available"] is False
+    assert oos_item["available"] is False
+    assert oos_item["unavailable_reason"] == "OUT_OF_STOCK"
+    assert oos_item["available_stock"] == 0
+    assert oos_item["available_quantity"] == 0
+    assert oos_item["line_total"] == 0
+
+    inactive_item = items_by_sku[inactive_sku]
+    assert inactive_item["is_available"] is False
+    assert inactive_item["available"] is False
+    assert inactive_item["unavailable_reason"] == "SKU_DISABLED"
+    assert inactive_item["line_total"] == 0
 
     unavailable = data["unavailable"]
     assert len(unavailable) == 2
     reasons = {item["sku_id"]: item["unavailable_reason"] for item in unavailable}
-    assert reasons[oos_sku] == "out_of_stock"
-    assert reasons[inactive_sku] == "not_active"
+    assert reasons[oos_sku] == "OUT_OF_STOCK"
+    assert reasons[inactive_sku] == "SKU_DISABLED"
+
+    assert data["summary"]["total_amount"] == 1000
+    assert data["summary"]["total_items"] == 3
+    assert data["summary"]["total_quantity"] == 3
+    assert data["summary"]["available_items"] == 1
+    assert data["summary"]["has_unavailable_items"] is True
+    assert data["summary"]["checkout_ready"] is False
+    assert len(data["checkout_payload"]["items"]) == 1
 
 
 # =====================================================================
@@ -219,6 +266,11 @@ async def test_guest_cart_merged_on_login(client: TestClient, db_session):
     assert lookup[auth_only_sku] == 7
     assert data["is_valid"] is True
 
+    guest_after = await db_session.execute(
+        select(CartItemModel).where(CartItemModel.user_id == guest_id)
+    )
+    assert guest_after.scalars().all() == []
+
 
 # =====================================================================
 # Extra: cart validation and contract-level behaviour
@@ -244,8 +296,13 @@ async def test_cart_validate_returns_unavailable_issue(client: TestClient, db_se
     assert len(data["issues"]) == 1
     assert data["issues"][0]["sku_id"] == sku_id
     assert data["issues"][0]["type"] == "OUT_OF_STOCK"
-    assert data["cart"]["items"] == []
-    assert data["cart"]["items_count"] == 0
+    # Unavailable rows stay in the main list and in the quantity count.
+    assert len(data["cart"]["items"]) == 1
+    assert data["cart"]["items"][0]["sku_id"] == sku_id
+    assert data["cart"]["items"][0]["is_available"] is False
+    assert data["cart"]["items"][0]["line_total"] == 0
+    assert data["cart"]["items_count"] == 2
+    assert data["cart"]["subtotal"] == 0
 
 
 @pytest.mark.asyncio
@@ -263,7 +320,7 @@ async def test_add_sku_quantity_exceeded_returns_409(client: TestClient, db_sess
         json={"sku_id": sku_id, "quantity": 2},
         headers=_auth_headers(user_id),
     )
-    assert response.status_code == 200
+    assert response.status_code == 201
 
     response = client.post(
         "/api/v1/cart/items",
@@ -275,7 +332,70 @@ async def test_add_sku_quantity_exceeded_returns_409(client: TestClient, db_sess
 
 
 @pytest.mark.asyncio
-async def test_update_cart_item_accepts_json_quantity(client: TestClient, db_session):
+async def test_first_add_exceeding_available_returns_409(client: TestClient, db_session):
+    """The first add must also respect available stock, not only increments."""
+    user_id = "test_user_first_add_exceeded"
+    sku_id = "sku-first-add-exceeded"
+    mock_data = _mock_sku_ok(sku_id=sku_id, price=100.0, quantity_available=3)
+
+    b2b_client.get_sku_by_id = AsyncMock(return_value=mock_data)
+
+    response = client.post(
+        "/api/v1/cart/items",
+        json={"sku_id": sku_id, "quantity": 5},
+        headers=_auth_headers(user_id),
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "QUANTITY_EXCEEDED"
+
+    result = await db_session.execute(
+        select(CartItemModel).where(CartItemModel.user_id == user_id)
+    )
+    assert result.scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_zero_active_quantity_does_not_fall_back_to_stock_quantity(
+    client: TestClient, db_session
+):
+    """``active_quantity = 0`` means out of stock even if stock_quantity > 0."""
+    user_id = "test_user_zero_active"
+    sku_id = "sku-zero-active"
+    db_session.add(CartItemModel(user_id=user_id, sku_id=sku_id, quantity=1))
+    await db_session.commit()
+
+    zero_active_sku = {
+        "id": sku_id,
+        "product_id": "prod-zero-active",
+        "name": "Zero Active Product",
+        "price": 100,
+        "discount": 0,
+        # Total warehouse stock is positive, but nothing is sellable.
+        "stock_quantity": 10,
+        "active_quantity": 0,
+        "article": None,
+        "images": [],
+        "characteristics": [],
+    }
+    b2b_client.get_skus_by_ids = AsyncMock(return_value={sku_id: zero_active_sku})
+    b2b_client.get_sku_by_id = AsyncMock(return_value=zero_active_sku)
+
+    response = client.get("/api/v1/cart", headers=_auth_headers(user_id))
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["available_quantity"] == 0
+    assert item["available_stock"] == 0
+    assert item["is_available"] is False
+    assert item["unavailable_reason"] == "OUT_OF_STOCK"
+    assert item["line_total"] == 0
+
+    response = client.post(
+        "/api/v1/cart/items",
+        json={"sku_id": sku_id, "quantity": 1},
+        headers=_auth_headers(user_id),
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "SKU_OUT_OF_STOCK"
     """PATCH /cart/items/{sku_id} accepts quantity in the JSON body."""
     user_id = "test_user_update"
     sku_id = "sku-update-001"
