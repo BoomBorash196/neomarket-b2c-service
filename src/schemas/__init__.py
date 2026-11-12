@@ -83,10 +83,16 @@ class CartItemUpdate(BaseModel):
 class CartItem(BaseModel):
     """Cart item with product details.
 
-    OpenAPI ``CartItem`` requires ``sku_id``, ``product_id``, ``name``,
-    ``quantity``, ``unit_price``, ``line_total``, ``available_quantity`` and
-    ``is_available``. Legacy fields (``cart_item_id``, ``product_title``,
-    ``sku_info``, ``subtotal``) are kept for older clients but are optional.
+    Superset of the B2C cart contracts:
+
+    * canon ``b2c/cart/openapi.yaml`` — ``item_id``, ``product_title``,
+      ``sku_name``, ``available_stock``, ``available``,
+      ``unavailable_reason``;
+    * earlier ``b2c/openapi.yaml`` — ``name``, ``available_quantity``,
+      ``is_available``.
+
+    Both shapes are emitted so existing clients keep working while the
+    canonical fields are available to new ones.
     """
     sku_id: str
     product_id: str
@@ -97,12 +103,71 @@ class CartItem(BaseModel):
     available_quantity: int
     is_available: bool
     cart_item_id: Optional[str] = None
+    item_id: Optional[str] = None
     product_title: Optional[str] = None
+    sku_name: Optional[str] = None
+    available_stock: Optional[int] = None
+    available: Optional[bool] = None
+    unavailable_reason: Optional[str] = None
+    image_url: Optional[str] = None
     sku_info: Optional[SKUInfo] = None
     subtotal: Optional[float] = None
     sku_code: Optional[str] = None
     unit_price_at_add: Optional[int] = None
     image: Optional[ImageRef] = None
+
+    @model_validator(mode="after")
+    def _sync_contract_aliases(self):
+        """Keep the canon and legacy field names in sync."""
+        if self.item_id is None:
+            self.item_id = self.cart_item_id
+        if self.cart_item_id is None:
+            self.cart_item_id = self.item_id
+        if self.product_title is None:
+            self.product_title = self.name
+        if not self.name:
+            self.name = self.product_title or ""
+        if self.sku_name is None:
+            self.sku_name = self.name
+        if self.available_stock is None:
+            self.available_stock = self.available_quantity
+        if not self.available_quantity:
+            self.available_quantity = self.available_stock
+        if self.available is None:
+            self.available = self.is_available
+        else:
+            self.is_available = self.available
+        return self
+
+
+class CartSummary(BaseModel):
+    """Canonical cart counter block (``CartSummary``)."""
+
+    total_amount: int = 0
+    total_items: int = 0
+    total_quantity: int = 0
+    available_items: int = 0
+    has_unavailable_items: bool = False
+    checkout_ready: bool = False
+    currency: str = "RUB"
+
+
+class CheckoutItem(BaseModel):
+    """One line of the canonical ``checkout_payload``."""
+
+    product_id: str
+    sku_id: str
+    quantity: int
+    unit_price: int
+    line_total: int
+
+
+class CheckoutPayload(BaseModel):
+    """Canonical ``checkout_payload`` handed to POST /orders."""
+
+    items: List[CheckoutItem] = []
+    total_amount: int = 0
+    currency: str = "RUB"
 
 
 class Cart(BaseModel):
@@ -116,6 +181,8 @@ class Cart(BaseModel):
     subtotal: float = 0.0
     is_valid: bool = True
     updated_at: Optional[datetime] = None
+    summary: Optional[CartSummary] = None
+    checkout_payload: Optional[CheckoutPayload] = None
 
 
 class UnavailableCartItem(BaseModel):
@@ -131,7 +198,7 @@ class UnavailableCartItem(BaseModel):
     product_id: str
     product_title: str
     price: float
-    unavailable_reason: str  # "out_of_stock" | "not_active" | "sku_not_found"
+    unavailable_reason: str  # OUT_OF_STOCK | PRODUCT_BLOCKED | PRODUCT_DELISTED | SKU_DISABLED
 
 
 class CartResponse(BaseModel):
@@ -143,6 +210,8 @@ class CartResponse(BaseModel):
     is_valid: bool
     id: Optional[str] = None
     updated_at: Optional[datetime] = None
+    summary: CartSummary
+    checkout_payload: CheckoutPayload
 
 
 class CartWithUnavailable(CartResponse):

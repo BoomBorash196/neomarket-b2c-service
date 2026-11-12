@@ -18,6 +18,9 @@ from src.schemas import (
     AddressResponse,
     CartItem,
     CartResponse,
+    CartSummary,
+    CheckoutItem,
+    CheckoutPayload,
     CartValidationIssue,
     CartValidationResponse,
     Order,
@@ -202,11 +205,11 @@ def _cart_validation_response(
     issues: List[CartValidationIssue] = []
     for item in unavailable:
         reason = item.get("unavailable_reason")
-        if reason == "out_of_stock":
+        if reason == "OUT_OF_STOCK":
             issue_type = "OUT_OF_STOCK"
-        elif reason == "not_active":
+        elif reason in {"PRODUCT_BLOCKED", "SKU_DISABLED", "ON_MODERATION"}:
             issue_type = "PRODUCT_BLOCKED"
-        elif reason == "sku_not_found":
+        elif reason in {"PRODUCT_DELETED", "PRODUCT_DELISTED"}:
             issue_type = "PRODUCT_DELETED"
         else:
             issue_type = "OUT_OF_STOCK"
@@ -218,11 +221,39 @@ def _cart_validation_response(
             )
         )
 
+    cart_items = [CartItem(**item) for item in available]
+    total_quantity = sum(int(item.quantity) for item in cart_items)
+    total_amount = float(sum(int(item.line_total) for item in cart_items))
+    summary = CartSummary(
+        total_amount=int(total_amount),
+        total_items=len(cart_items),
+        total_quantity=total_quantity,
+        available_items=len(cart_items),
+        has_unavailable_items=bool(unavailable),
+        checkout_ready=bool(cart_items) and not unavailable,
+        currency="RUB",
+    )
+    checkout_payload = CheckoutPayload(
+        items=[
+            CheckoutItem(
+                product_id=item.product_id,
+                sku_id=item.sku_id,
+                quantity=item.quantity,
+                unit_price=item.unit_price,
+                line_total=item.line_total,
+            )
+            for item in cart_items
+        ],
+        total_amount=int(total_amount),
+        currency="RUB",
+    )
     cart = CartResponse(
-        items=[CartItem(**item) for item in available],
-        items_count=sum(int(item.get("quantity") or 0) for item in available),
-        subtotal=sum(float(item.get("subtotal") or 0.0) for item in available),
+        items=cart_items,
+        items_count=total_quantity,
+        subtotal=total_amount,
         is_valid=not unavailable,
+        summary=summary,
+        checkout_payload=checkout_payload,
     )
     return CartValidationResponse(is_valid=cart.is_valid, cart=cart, issues=issues)
 
