@@ -279,6 +279,51 @@ async def test_b2b_unavailable_returns_503(
     assert result.scalars().all() == []
 
 
+@pytest.mark.asyncio
+async def test_b2b_product_card_unavailable_returns_503(
+    client: TestClient, db_session
+):
+    """B2B failure while fetching the product card must map to 503, not 500."""
+    user_id = "test_user_product_503"
+    sku_id = "sku-product-503"
+
+    db_session.add(_mock_cart_item(user_id, sku_id, quantity=1))
+    await db_session.commit()
+
+    b2b_client.get_skus_by_ids = AsyncMock(
+        return_value={
+            sku_id: _mock_sku(
+                sku_id,
+                price=100.0,
+                product_id="prod-card-503",
+            )
+        }
+    )
+    b2b_client.get_product_by_id = AsyncMock(
+        side_effect=B2BClientError(
+            status_code=503,
+            message="Product card service unavailable",
+        )
+    )
+    b2b_client.reserve_stock = AsyncMock(return_value=_mock_reserve_success())
+
+    response = client.post(
+        "/api/v1/orders",
+        json={"user_id": user_id},
+        headers={"Idempotency-Key": "idem-product-card-503"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "B2B_UNAVAILABLE"
+
+    # Enrichment happens before reserve, so nothing may be reserved or created.
+    b2b_client.reserve_stock.assert_not_awaited()
+    result = await db_session.execute(
+        select(OrderModel).where(OrderModel.user_id == user_id)
+    )
+    assert result.scalars().all() == []
+
+
 # =====================================================================
 # 5. checkout_snapshot_mismatch_returns_cart_validation_response
 # =====================================================================
