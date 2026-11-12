@@ -361,7 +361,32 @@ async def checkout(
         sku_info = skus_data.get(ci.sku_id)
         if not sku_info:
             continue
-        product = await b2b_client.get_product_by_id(sku_info.get("product_id", ""))
+        try:
+            product = await b2b_client.get_product_by_id(
+                sku_info.get("product_id", "")
+            )
+        except B2BClientError as exc:
+            # The canon checkout flow requires 503 when B2B is unavailable at
+            # any enrichment step. Without this local handler the exception
+            # escapes as a generic 500 and the documented contract is broken.
+            if exc.status_code >= 500 or exc.kind in ("connect", "timeout"):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        "code": "B2B_UNAVAILABLE",
+                        "message": (
+                            "B2B product card unavailable: "
+                            f"{exc.message}"
+                        ),
+                    },
+                ) from exc
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "code": "B2B_ERROR",
+                    "message": f"B2B product card error: {exc.message}",
+                },
+            ) from exc
         product_title = (
             str(product.get("title") or "")
             if product
