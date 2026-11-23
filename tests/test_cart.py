@@ -220,6 +220,73 @@ async def test_unavailable_sku_shown_with_reason(client: TestClient, db_session)
 
 
 # =====================================================================
+# 4b. disappearing SKU keeps the mandatory line identity
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_missing_sku_keeps_mandatory_identity_in_items(client: TestClient, db_session):
+    """A SKU removed from B2B stays in `items` with mandatory product identity."""
+    user_id = "test_user_missing_sku"
+    sku_id = "sku-vanished-001"
+    row = CartItemModel(user_id=user_id, sku_id=sku_id, quantity=2)
+    db_session.add(row)
+    await db_session.commit()
+    cart_item_id = str(row.cart_item_id)
+
+    # B2B no longer knows this SKU at all.
+    b2b_client.get_skus_by_ids = AsyncMock(return_value={})
+
+    response = client.get("/api/v1/cart", headers=_auth_headers(user_id))
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert len(data["items"]) == 1
+    assert len(data["unavailable"]) == 1
+    item = data["items"][0]
+    unavailable = data["unavailable"][0]
+
+    # Mandatory line identification survives a catalog disappearance: the line
+    # id, the SKU and a non-empty product id/title are all still present.
+    assert item["cart_item_id"] == cart_item_id
+    assert item["item_id"] == cart_item_id
+    assert item["sku_id"] == sku_id
+    assert item["product_id"] == sku_id
+    assert item["product_id"] != ""
+    assert item["name"] == f"SKU {sku_id}"
+    assert item["product_title"] == f"SKU {sku_id}"
+    assert item["sku_name"] == f"SKU {sku_id}"
+    assert item["quantity"] == 2
+    assert item["unit_price"] == 0
+    assert item["line_total"] == 0
+    assert item["available_quantity"] == 0
+    assert item["available_stock"] == 0
+    assert item["is_available"] is False
+    assert item["available"] is False
+    assert item["unavailable_reason"] == "PRODUCT_DELISTED"
+
+    assert unavailable["cart_item_id"] == cart_item_id
+    assert unavailable["sku_id"] == sku_id
+    assert unavailable["product_id"] == sku_id
+    assert unavailable["product_title"] == f"SKU {sku_id}"
+    assert unavailable["quantity"] == 2
+    assert unavailable["unavailable_reason"] == "PRODUCT_DELISTED"
+
+    assert data["items_count"] == 2
+    assert data["total_items"] == 2
+    assert data["total_amount"] == 0.0
+    assert data["subtotal"] == 0.0
+    assert data["is_valid"] is False
+    assert data["summary"]["total_amount"] == 0
+    assert data["summary"]["total_items"] == 1
+    assert data["summary"]["total_quantity"] == 2
+    assert data["summary"]["available_items"] == 0
+    assert data["summary"]["has_unavailable_items"] is True
+    assert data["summary"]["checkout_ready"] is False
+    assert data["checkout_payload"]["items"] == []
+
+
+# =====================================================================
 # 4. guest_cart_merged_on_login
 # =====================================================================
 
