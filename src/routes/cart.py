@@ -109,6 +109,17 @@ def _image_url(sku_info: dict) -> Optional[str]:
     return None
 
 
+def _missing_sku_identity(sku_id: str) -> tuple[str, str]:
+    """Stable product identity for a SKU that B2B no longer returns.
+
+    The cart spec requires ``product_id`` and ``name`` on every line, including
+    unavailable ones. When the catalog has dropped the SKU we keep the
+    buyer-facing SKU identifier as the product identifier instead of emitting
+    an empty ``product_id``, so the mandatory line identification is never lost.
+    """
+    return sku_id, f"SKU {sku_id}"
+
+
 def _enrich_cart_items(
     cart_items: List[CartItemModel],
     skus_data: dict[str, dict],
@@ -131,13 +142,13 @@ def _enrich_cart_items(
         sku_info = skus_data.get(sku_id)
 
         if not sku_info:
-            name = f"SKU {sku_id}"
+            product_id, name = _missing_sku_identity(sku_id)
             reason = "PRODUCT_DELISTED"
             items.append({
                 "cart_item_id": cart_item_id,
                 "item_id": cart_item_id,
                 "sku_id": sku_id,
-                "product_id": "",
+                "product_id": product_id,
                 "name": name,
                 "product_title": name,
                 "sku_name": name,
@@ -155,7 +166,7 @@ def _enrich_cart_items(
                 "cart_item_id": cart_item_id,
                 "sku_id": sku_id,
                 "quantity": int(ci.quantity),
-                "product_id": "",
+                "product_id": product_id,
                 "product_title": name,
                 "price": 0.0,
                 "unavailable_reason": reason,
@@ -178,7 +189,7 @@ def _enrich_cart_items(
             or f"SKU {sku_id}"
         )
         product_title = str(sku_info.get("product_title") or name)
-        product_id = str(sku_info.get("product_id") or "")
+        product_id = str(sku_info.get("product_id") or _missing_sku_identity(sku_id)[0])
 
         items.append({
             "cart_item_id": cart_item_id,
