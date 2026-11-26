@@ -228,7 +228,15 @@ async def test_missing_sku_keeps_mandatory_identity_in_items(client: TestClient,
     """A SKU removed from B2B stays in `items` with mandatory product identity."""
     user_id = "test_user_missing_sku"
     sku_id = "sku-vanished-001"
-    row = CartItemModel(user_id=user_id, sku_id=sku_id, quantity=2)
+    product_id = "prod-vanished-001"
+    product_title = "Vanished Product"
+    row = CartItemModel(
+        user_id=user_id,
+        sku_id=sku_id,
+        product_id=product_id,
+        product_title=product_title,
+        quantity=2,
+    )
     db_session.add(row)
     await db_session.commit()
     cart_item_id = str(row.cart_item_id)
@@ -251,11 +259,11 @@ async def test_missing_sku_keeps_mandatory_identity_in_items(client: TestClient,
     assert item["cart_item_id"] == cart_item_id
     assert item["item_id"] == cart_item_id
     assert item["sku_id"] == sku_id
-    assert item["product_id"] == sku_id
-    assert item["product_id"] != ""
-    assert item["name"] == f"SKU {sku_id}"
-    assert item["product_title"] == f"SKU {sku_id}"
-    assert item["sku_name"] == f"SKU {sku_id}"
+    assert item["product_id"] == product_id
+    assert item["product_id"] != sku_id
+    assert item["name"] == product_title
+    assert item["product_title"] == product_title
+    assert item["sku_name"] == product_title
     assert item["quantity"] == 2
     assert item["unit_price"] == 0
     assert item["line_total"] == 0
@@ -267,8 +275,9 @@ async def test_missing_sku_keeps_mandatory_identity_in_items(client: TestClient,
 
     assert unavailable["cart_item_id"] == cart_item_id
     assert unavailable["sku_id"] == sku_id
-    assert unavailable["product_id"] == sku_id
-    assert unavailable["product_title"] == f"SKU {sku_id}"
+    assert unavailable["product_id"] == product_id
+    assert unavailable["product_id"] != sku_id
+    assert unavailable["product_title"] == product_title
     assert unavailable["quantity"] == 2
     assert unavailable["unavailable_reason"] == "PRODUCT_DELISTED"
 
@@ -284,6 +293,61 @@ async def test_missing_sku_keeps_mandatory_identity_in_items(client: TestClient,
     assert data["summary"]["has_unavailable_items"] is True
     assert data["summary"]["checkout_ready"] is False
     assert data["checkout_payload"]["items"] == []
+
+
+# =====================================================================
+# 4c. product identity added via API survives SKU disappearance
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_missing_sku_added_via_api_keeps_original_product_id(client: TestClient, db_session):
+    """The product id snapshot is captured on add and reused when the SKU vanishes."""
+    user_id = "test_user_api_missing_sku"
+    sku_id = "sku-api-vanished-001"
+    product_id = "prod-api-vanished-001"
+    product_title = "API Vanished Product"
+    sku = _mock_sku_ok(
+        sku_id=sku_id,
+        price=700.0,
+        quantity_available=5,
+        product_id=product_id,
+        product_title=product_title,
+    )
+    b2b_client.get_sku_by_id = AsyncMock(return_value=sku)
+    b2b_client.get_skus_by_ids = AsyncMock(return_value={sku_id: sku})
+
+    add_response = client.post(
+        "/api/v1/cart/items",
+        json={"sku_id": sku_id, "quantity": 1},
+        headers=_auth_headers(user_id),
+    )
+    assert add_response.status_code == 201
+
+    stored = await db_session.execute(
+        select(CartItemModel).where(
+            (CartItemModel.user_id == user_id) & (CartItemModel.sku_id == sku_id)
+        )
+    )
+    row = stored.scalar_one()
+    assert row.product_id == product_id
+    assert row.product_id != sku_id
+    assert row.product_title == product_title
+
+    # The variant disappears from the catalog after it was added to the cart.
+    b2b_client.get_skus_by_ids = AsyncMock(return_value={})
+
+    response = client.get("/api/v1/cart", headers=_auth_headers(user_id))
+    assert response.status_code == 200
+    data = response.json()
+    item = data["items"][0]
+
+    assert item["sku_id"] == sku_id
+    assert item["product_id"] == product_id
+    assert item["product_id"] != sku_id
+    assert item["product_title"] == product_title
+    assert item["is_available"] is False
+    assert item["unavailable_reason"] == "PRODUCT_DELISTED"
+    assert item["line_total"] == 0
 
 
 # =====================================================================

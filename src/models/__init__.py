@@ -22,6 +22,11 @@ class CartItemModel(Base):
     cart_item_id = Column(String(64), primary_key=True, default=_uuid_str)
     user_id = Column(String(64), nullable=False, index=True)
     sku_id = Column(String(64), nullable=False)
+    # Product identity captured from B2B when the line is added. It is kept so
+    # the line still points at the original product if the SKU is later removed
+    # from the catalog. This is identity only — prices are never stored here.
+    product_id = Column(String(64), nullable=True)
+    product_title = Column(String(255), nullable=True)
     quantity = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
