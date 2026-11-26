@@ -109,15 +109,22 @@ def _image_url(sku_info: dict) -> Optional[str]:
     return None
 
 
-def _missing_sku_identity(sku_id: str) -> tuple[str, str]:
-    """Stable product identity for a SKU that B2B no longer returns.
+def _missing_sku_identity(
+    sku_id: str,
+    product_id: Optional[str] = None,
+    product_title: Optional[str] = None,
+) -> tuple[str, str]:
+    """Product identity for a cart line whose SKU is gone from B2B.
 
-    The cart spec requires ``product_id`` and ``name`` on every line, including
-    unavailable ones. When the catalog has dropped the SKU we keep the
-    buyer-facing SKU identifier as the product identifier instead of emitting
-    an empty ``product_id``, so the mandatory line identification is never lost.
+    ``product_id`` and ``sku_id`` are different entities in the cart contract.
+    The real product id is snapshotted on the cart row when the item is added
+    and must be reused here. For a legacy row without that snapshot we emit a
+    clearly synthetic product id — never the SKU id — so a variant identifier
+    can never be mistaken for a product identifier.
     """
-    return sku_id, f"SKU {sku_id}"
+    resolved_product_id = str(product_id) if product_id else f"product-{sku_id}"
+    resolved_title = str(product_title) if product_title else f"SKU {sku_id}"
+    return resolved_product_id, resolved_title
 
 
 def _enrich_cart_items(
@@ -142,7 +149,9 @@ def _enrich_cart_items(
         sku_info = skus_data.get(sku_id)
 
         if not sku_info:
-            product_id, name = _missing_sku_identity(sku_id)
+            product_id, name = _missing_sku_identity(
+                sku_id, ci.product_id, ci.product_title
+            )
             reason = "PRODUCT_DELISTED"
             items.append({
                 "cart_item_id": cart_item_id,
@@ -189,7 +198,15 @@ def _enrich_cart_items(
             or f"SKU {sku_id}"
         )
         product_title = str(sku_info.get("product_title") or name)
-        product_id = str(sku_info.get("product_id") or _missing_sku_identity(sku_id)[0])
+        product_id = str(
+            sku_info.get("product_id") or _missing_sku_identity(sku_id, ci.product_id)[0]
+        )
+        # Backfill older rows while the SKU is still in the catalog, so a later
+        # disappearance can still report the original product identity.
+        if not ci.product_id:
+            ci.product_id = product_id
+        if not ci.product_title:
+            ci.product_title = product_title
 
         items.append({
             "cart_item_id": cart_item_id,
@@ -315,6 +332,8 @@ async def get_cart(
         )
 
     items, unavailable = _enrich_cart_items(cart_items, skus_data)
+    # Persist the product identity backfill for older cart rows.
+    await db.commit()
     return _build_cart_response(user_id, items, unavailable)
 
 
@@ -351,6 +370,10 @@ async def add_to_cart(
         )
 
     qty_available = _available_quantity(sku_data)
+    # Snapshot product identity (not price): a SKU may vanish later, but the
+    # line must still point at the product it was added from.
+    product_id = str(sku_data.get("product_id") or "")
+    product_title = str(sku_data.get("product_title") or sku_data.get("name") or "")
 
     if _sku_unavailable_reason(sku_data) is not None:
         raise HTTPException(
@@ -390,11 +413,17 @@ async def add_to_cart(
 
     if existing_item:
         existing_item.quantity = new_qty
+        if not existing_item.product_id:
+            existing_item.product_id = product_id
+        if not existing_item.product_title:
+            existing_item.product_title = product_title
     else:
         db.add(
             CartItemModel(
                 user_id=user_id,
                 sku_id=item.sku_id,
+                product_id=product_id,
+                product_title=product_title,
                 quantity=new_qty,
             )
         )
@@ -443,6 +472,8 @@ async def validate_cart(
         )
 
     items, unavailable = _enrich_cart_items(cart_items, skus_data)
+    # Persist the product identity backfill for older cart rows.
+    await db.commit()
     issues: List[CartValidationIssue] = []
 
     for item in unavailable:
@@ -600,11 +631,18 @@ async def merge_guest_cart(
 
     for gi in guest_items:
         if gi.sku_id in auth_lookup:
-            auth_lookup[gi.sku_id].quantity = max(gi.quantity, auth_lookup[gi.sku_id].quantity)
+            auth_item = auth_lookup[gi.sku_id]
+            auth_item.quantity = max(gi.quantity, auth_item.quantity)
+            if not auth_item.product_id:
+                auth_item.product_id = gi.product_id
+            if not auth_item.product_title:
+                auth_item.product_title = gi.product_title
         else:
             new_item = CartItemModel(
                 user_id=auth_user_id,
                 sku_id=gi.sku_id,
+                product_id=gi.product_id,
+                product_title=gi.product_title,
                 quantity=gi.quantity,
             )
             db.add(new_item)

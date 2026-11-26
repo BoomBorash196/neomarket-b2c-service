@@ -60,10 +60,15 @@ def test_alembic_upgrade_head_on_clean_database(tmp_path):
             "paid_at",
         } <= order_columns
 
+        cart_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(cart_items)")
+        }
+        assert {"sku_id", "product_id", "product_title"} <= cart_columns
+
         revision = conn.execute(
             "SELECT version_num FROM alembic_version"
         ).fetchone()[0]
-        assert revision == "007_add_cancel_retry_fields"
+        assert revision == "008_add_cart_product_identity"
 
 
 def test_order_primary_keys_are_uuid_strings(tmp_path):
